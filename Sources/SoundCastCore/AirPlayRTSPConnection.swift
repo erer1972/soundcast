@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 
@@ -46,9 +47,26 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
         "X-Apple-PD": "1",
     ]
 
+    /// Per-direction state for the encrypted channel pair-verify unlocks.
+    /// Framing (per public research, not yet independently verified
+    /// against a live encrypted exchange the way pairing was): each
+    /// frame is a 2-byte little-endian plaintext length (itself used as
+    /// AAD), up to 1024 bytes of ChaCha20-Poly1305 ciphertext, then a
+    /// 16-byte Poly1305 tag. The nonce is 4 zero bytes followed by an
+    /// 8-byte little-endian counter that increments once per frame, kept
+    /// separately per direction.
+    private struct EncryptionState {
+        let readKey: SymmetricKey
+        let writeKey: SymmetricKey
+        var readCounter: UInt64 = 0
+        var writeCounter: UInt64 = 0
+    }
+
     private let connection: NWConnection
     private var cseq: Int = 0
     private var receiveBuffer = Data()
+    private var rawReceiveBuffer = Data()
+    private var encryption: EncryptionState?
 
     public init(host: NWEndpoint.Host, port: NWEndpoint.Port) {
         connection = NWConnection(host: host, port: port, using: .tcp)
@@ -76,6 +94,64 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
         connection.cancel()
     }
 
+    /// Switches this connection to the encrypted framing pair-verify's
+    /// session keys unlock. Call once, right after a successful
+    /// pair-verify; every `send()` after this point is transparently
+    /// encrypted/decrypted.
+    public func enableEncryption(readKey: SymmetricKey, writeKey: SymmetricKey) {
+        encryption = EncryptionState(readKey: readKey, writeKey: writeKey)
+    }
+
+    private func encryptedNonce(counter: UInt64) -> ChaChaPoly.Nonce {
+        var bytes = [UInt8](repeating: 0, count: 4)
+        withUnsafeBytes(of: counter.littleEndian) { bytes.append(contentsOf: $0) }
+        return try! ChaChaPoly.Nonce(data: bytes)
+    }
+
+    /// Splits `data` into <=1024-byte chunks and encrypts each into one
+    /// wire frame: 2-byte little-endian length (used as AAD) + ciphertext
+    /// + 16-byte tag.
+    private func encryptFrames(_ data: Data) throws -> Data {
+        guard var state = encryption else { return data }
+        var out = Data()
+        var offset = 0
+        while offset < data.count {
+            let chunkEnd = min(offset + 1024, data.count)
+            let chunk = data[offset..<chunkEnd]
+            let lengthLE = UInt16(chunk.count).littleEndian
+            let lengthBytes = withUnsafeBytes(of: lengthLE) { Data($0) }
+            let sealed = try ChaChaPoly.seal(chunk, using: state.writeKey, nonce: encryptedNonce(counter: state.writeCounter), authenticating: lengthBytes)
+            out.append(lengthBytes)
+            out.append(sealed.ciphertext)
+            out.append(contentsOf: sealed.tag)
+            state.writeCounter += 1
+            offset = chunkEnd
+        }
+        encryption = state
+        return out
+    }
+
+    /// Decrypts as many complete frames as `rawReceiveBuffer` currently
+    /// holds, appending their plaintext to `receiveBuffer`. Leaves any
+    /// trailing partial frame in `rawReceiveBuffer` for next time.
+    private func decryptAvailableFrames() throws {
+        guard var state = encryption else { return }
+        while rawReceiveBuffer.count >= 2 {
+            let lengthBytes = Data(rawReceiveBuffer.prefix(2))
+            let length = Int(lengthBytes[lengthBytes.startIndex]) | (Int(lengthBytes[lengthBytes.startIndex + 1]) << 8)
+            let frameTotal = 2 + length + 16
+            guard rawReceiveBuffer.count >= frameTotal else { return }
+            let ciphertext = rawReceiveBuffer[(rawReceiveBuffer.startIndex + 2)..<(rawReceiveBuffer.startIndex + 2 + length)]
+            let tag = rawReceiveBuffer[(rawReceiveBuffer.startIndex + 2 + length)..<(rawReceiveBuffer.startIndex + frameTotal)]
+            let box = try ChaChaPoly.SealedBox(nonce: encryptedNonce(counter: state.readCounter), ciphertext: ciphertext, tag: tag)
+            let plaintext = try ChaChaPoly.open(box, using: state.readKey, authenticating: Data(lengthBytes))
+            receiveBuffer.append(plaintext)
+            state.readCounter += 1
+            rawReceiveBuffer.removeSubrange(rawReceiveBuffer.startIndex..<(rawReceiveBuffer.startIndex + frameTotal))
+        }
+        encryption = state
+    }
+
     @discardableResult
     public func send(
         method: String,
@@ -98,6 +174,7 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
         let requestText = headerLines.joined(separator: "\r\n") + "\r\n\r\n"
         var requestData = Data(requestText.utf8)
         requestData.append(Data(body))
+        requestData = try encryptFrames(requestData)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: requestData, completion: .contentProcessed { error in
@@ -118,7 +195,12 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
                 return response
             }
             let chunk = try await receiveChunk()
-            receiveBuffer.append(chunk)
+            if encryption != nil {
+                rawReceiveBuffer.append(chunk)
+                try decryptAvailableFrames()
+            } else {
+                receiveBuffer.append(chunk)
+            }
         }
     }
 

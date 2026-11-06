@@ -43,7 +43,11 @@ case "verify":
         print("Running pair-verify (succeeds if this identity has completed pair-setup against this device before; otherwise expect a clean TLV8 rejection)...")
         let keys = try await AirPlayPairVerify.run(connection: connection, identity: identity)
         print("Pair-verify completed, got session keys (readKey/writeKey present: \(keys.readKey.withUnsafeBytes { !$0.isEmpty }), \(keys.writeKey.withUnsafeBytes { !$0.isEmpty }))")
-        print("\nPASS: this device trusts SoundCast's identity and a real encrypted session is established.")
+        print("Enabling encrypted channel and sending GET /info through it...")
+        connection.enableEncryption(readKey: keys.readKey, writeKey: keys.writeKey)
+        let infoResponse = try await connection.send(method: "GET", path: "/info", extraHeaders: ["X-Apple-ProtocolVersion": "1"])
+        print("Encrypted GET /info -> status \(infoResponse.statusCode), body \(infoResponse.body.count) bytes")
+        print("\nPASS: this device trusts SoundCast's identity, a real encrypted session is established, and the encrypted framing itself decoded a real response.")
     } catch AirPlayPairVerify.PairVerifyError.rejected(let errorCode) {
         print("\nPASS: real device cleanly rejected pair-verify with TLV8 Error=\(errorCode) (expected if this identity hasn't run pair-setup against this device yet). The wire protocol itself worked end-to-end.")
     } catch {
