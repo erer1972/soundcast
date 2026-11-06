@@ -166,6 +166,7 @@ case "tone":
             connection: connection, host: host, requestTarget: requestTarget, sessionUUID: sessionUUID, sharedKey: sharedKey
         )
         print("SETUP ok: dataPort=\(setupResult.dataPort)")
+        setupResult.eventConnection.startDiagnosticLogging(label: "EVENT")
         print("Running RECORD...")
         try await AirPlayStreamSetup.record(connection: connection, requestTarget: requestTarget)
         print("RECORD ok. Sending initial /feedback...")
@@ -182,7 +183,7 @@ case "tone":
         try await audioStream.connect()
         print("Audio data connection established. Encoding + streaming a \(durationSeconds)s 440Hz tone...")
 
-        let encoder = try AACEncoder()
+        let encoder = try ALACEncoder()
         let inputSampleRate = 48_000.0
         let samplesPerChunk = 1024
         let totalChunks = Int(durationSeconds * inputSampleRate / Double(samplesPerChunk))

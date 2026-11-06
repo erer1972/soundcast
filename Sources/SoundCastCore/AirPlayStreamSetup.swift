@@ -61,7 +61,9 @@ public enum AirPlayStreamSetup {
         host: NWEndpoint.Host,
         requestTarget: String,
         sessionUUID: String,
-        sharedKey: [UInt8]
+        sharedKey: [UInt8],
+        audioFormat: Int = 0x0004_0000, // ALAC 44100/16/2 — confirmed from a public AirPlay2 sender's own doc comment
+        samplesPerFrame: Int = 4096 // ALAC's standard frame size
     ) async throws -> Result {
         let phase1Body: [String: Any] = [
             "timingProtocol": "PTP",
@@ -96,8 +98,8 @@ public enum AirPlayStreamSetup {
 
         let streamDict: [String: Any] = [
             "type": 103, // "buffered" — TCP audio channel, no PTP needed
-            "audioFormat": 0x400000, // AAC-LC 44.1kHz stereo
-            "spf": 1024, // samples per AAC-LC frame
+            "audioFormat": audioFormat,
+            "spf": samplesPerFrame,
             "shk": Data(sharedKey),
         ]
         let phase2Body: [String: Any] = ["streams": [streamDict]]

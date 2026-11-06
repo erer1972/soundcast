@@ -107,6 +107,33 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
         connection.cancel()
     }
 
+    /// Diagnostic only: logs whatever bytes arrive on this connection
+    /// without otherwise consuming/parsing them, for investigating
+    /// connections (like the event connection SETUP phase 1 opens) this
+    /// client never normally reads from.
+    public func startDiagnosticLogging(label: String) {
+        func loop() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
+                if let error {
+                    FileHandle.standardError.write("[\(label)] receive error: \(error)\n".data(using: .utf8)!)
+                    return
+                }
+                if let data, !data.isEmpty {
+                    FileHandle.standardError.write("[\(label)] received \(data.count) bytes: \(data.map { String(format: "%02x", $0) }.joined())\n".data(using: .utf8)!)
+                    if let text = String(data: data, encoding: .utf8) {
+                        FileHandle.standardError.write("[\(label)] as text: \(text)\n".data(using: .utf8)!)
+                    }
+                }
+                if isComplete {
+                    FileHandle.standardError.write("[\(label)] connection closed by peer\n".data(using: .utf8)!)
+                    return
+                }
+                loop()
+            }
+        }
+        loop()
+    }
+
     /// Switches this connection to the encrypted framing pair-verify's
     /// session keys unlock. Call once, right after a successful
     /// pair-verify; every `send()` after this point is transparently
