@@ -167,21 +167,36 @@ case "tone":
         )
         print("SETUP ok: dataPort=\(setupResult.dataPort)")
         setupResult.eventConnection.startDiagnosticLogging(label: "EVENT")
+        print("Opening audio data connection BEFORE RECORD (mirroring the eventPort pattern), with retries...")
+        let audioStream = AirPlayAudioStream(host: host, port: NWEndpoint.Port(rawValue: UInt16(setupResult.dataPort))!, sharedKey: sharedKey, nonceStrategy: nonceStrategy, aadStrategy: aadStrategy)
+        var connected = false
+        for attempt in 1...5 {
+            do {
+                try await audioStream.connect()
+                connected = true
+                print("Audio data connection established on attempt \(attempt).")
+                break
+            } catch {
+                print("  attempt \(attempt) failed: \(error) — retrying in 0.3s")
+                try await Task.sleep(nanoseconds: 300_000_000)
+            }
+        }
+        guard connected else {
+            print("\nFAIL: could not connect to dataPort after 5 attempts.")
+            connection.close()
+            exit(1)
+        }
         print("Running RECORD...")
         try await AirPlayStreamSetup.record(connection: connection, requestTarget: requestTarget)
-        print("RECORD ok. Sending initial /feedback...")
-        // A real macOS sender's encrypted control channel sent a small
-        // periodic request (~87 bytes) roughly every 2s, captured earlier
-        // this session before IPv6 was understood to be the real
-        // channel — almost certainly POST /feedback (a real endpoint per
-        // a real receiver's own dispatch table). Never implemented until
-        // now; the data connection dying after exactly one real frame is
-        // consistent with the receiver treating a silent sender as dead.
-        _ = try await connection.send(method: "POST", path: "/feedback", extraHeaders: AirPlayStreamSetup.streamHeaders)
-        print("Opening audio data connection...")
-        let audioStream = AirPlayAudioStream(host: host, port: NWEndpoint.Port(rawValue: UInt16(setupResult.dataPort))!, sharedKey: sharedKey, nonceStrategy: nonceStrategy, aadStrategy: aadStrategy)
-        try await audioStream.connect()
-        print("Audio data connection established. Encoding + streaming a \(durationSeconds)s 440Hz tone...")
+        print("RECORD ok. Sending SET_PARAMETER (volume)...")
+        let volumeBody = Array("volume: 0.000000\r\n".utf8)
+        let volResponse = try await connection.send(
+            method: "SET_PARAMETER", path: requestTarget,
+            extraHeaders: AirPlayStreamSetup.streamHeaders.merging(["Content-Type": "text/parameters"]) { _, n in n },
+            body: volumeBody
+        )
+        print("SET_PARAMETER -> status \(volResponse.statusCode)")
+        print("Encoding + streaming a \(durationSeconds)s 440Hz tone...")
 
         let encoder = try ALACEncoder()
         let inputSampleRate = 48_000.0
