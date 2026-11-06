@@ -20,15 +20,50 @@ import Network
 /// packet (timestamp + SSRC — the sequence number itself isn't
 /// authenticated).
 public final class AirPlayAudioStream: @unchecked Sendable {
+    /// Which 8-byte nonce suffix to use — kept switchable while this is
+    /// still unverified against the real device. `.random` is what the
+    /// one reference implementation we have describes (nonce suffix
+    /// read back off the wire); `.counterLE`/`.counterBE` test the
+    /// hypothesis that the real receiver instead reconstructs the nonce
+    /// from its own tracked per-packet counter (ignoring whatever we
+    /// send in that field), the same way the already-verified control
+    /// channel does.
+    public enum NonceStrategy {
+        case random
+        case counterLE
+        case counterBE
+    }
+
+    /// Which bytes to authenticate (AAD) — switchable for the same
+    /// reason as `NonceStrategy`: `.timestampSSRC` (bytes 4..12) is
+    /// what the one reference implementation describes; `.fullHeader`
+    /// (all 12 bytes, including seq) tests whether the real receiver
+    /// authenticates the sequence number too.
+    public enum AADStrategy {
+        case timestampSSRC
+        case fullHeader
+    }
+
     private let connection: NWConnection
     private let key: SymmetricKey
     private let ssrc: UInt32
-    private var sequence: UInt32 = 0
+    private let nonceStrategy: NonceStrategy
+    private let aadStrategy: AADStrategy
+    // Matches the "RTP-Info: seq=1" header sent on RECORD — if the
+    // receiver holds the sender to that promise, starting at 0 would
+    // itself be a protocol violation independent of anything
+    // crypto-related, worth ruling out cheaply.
+    private var sequence: UInt32 = 1
 
-    public init(host: NWEndpoint.Host, port: NWEndpoint.Port, sharedKey: [UInt8]) {
+    public init(
+        host: NWEndpoint.Host, port: NWEndpoint.Port, sharedKey: [UInt8],
+        nonceStrategy: NonceStrategy = .random, aadStrategy: AADStrategy = .timestampSSRC
+    ) {
         connection = NWConnection(host: host, port: port, using: .tcp)
         key = SymmetricKey(data: sharedKey)
         ssrc = UInt32.random(in: 0...UInt32.max)
+        self.nonceStrategy = nonceStrategy
+        self.aadStrategy = aadStrategy
     }
 
     public enum StreamError: Error {
@@ -75,7 +110,16 @@ public final class AirPlayAudioStream: @unchecked Sendable {
         sequence += 1
 
         var nonceSuffix = [UInt8](repeating: 0, count: 8)
-        for i in 0..<8 { nonceSuffix[i] = UInt8.random(in: 0...255) }
+        switch nonceStrategy {
+        case .random:
+            for i in 0..<8 { nonceSuffix[i] = UInt8.random(in: 0...255) }
+        case .counterLE:
+            let counter = UInt64(seq).littleEndian
+            withUnsafeBytes(of: counter) { nonceSuffix = Array($0) }
+        case .counterBE:
+            let counter = UInt64(seq).bigEndian
+            withUnsafeBytes(of: counter) { nonceSuffix = Array($0) }
+        }
         var nonceBytes = [UInt8](repeating: 0, count: 4)
         nonceBytes.append(contentsOf: nonceSuffix)
         let nonce = try ChaChaPoly.Nonce(data: nonceBytes)
@@ -98,7 +142,13 @@ public final class AirPlayAudioStream: @unchecked Sendable {
         header.append(UInt8((ssrc >> 8) & 0xFF))
         header.append(UInt8(ssrc & 0xFF))
 
-        let aad = Data(header[4..<12])
+        let aad: Data
+        switch aadStrategy {
+        case .timestampSSRC:
+            aad = Data(header[4..<12])
+        case .fullHeader:
+            aad = Data(header)
+        }
         let sealed = try ChaChaPoly.seal(aacData, using: key, nonce: nonce, authenticating: aad)
 
         if ProcessInfo.processInfo.environment["DEBUG_AUDIO"] != nil {

@@ -138,6 +138,18 @@ case "stream":
 case "tone":
     let port = args.count >= 4 ? (UInt16(args[3]) ?? 7000) : 7000
     let durationSeconds = args.count >= 5 ? (Double(args[4]) ?? 5.0) : 5.0
+    let nonceStrategy: AirPlayAudioStream.NonceStrategy = {
+        guard args.count >= 6 else { return .random }
+        switch args[5] {
+        case "counterLE": return .counterLE
+        case "counterBE": return .counterBE
+        default: return .random
+        }
+    }()
+    let aadStrategy: AirPlayAudioStream.AADStrategy = {
+        guard args.count >= 7, args[6] == "fullHeader" else { return .timestampSSRC }
+        return .fullHeader
+    }()
     let connection = try await connect(port: port)
     do {
         print("Running pair-verify...")
@@ -166,7 +178,7 @@ case "tone":
         // consistent with the receiver treating a silent sender as dead.
         _ = try await connection.send(method: "POST", path: "/feedback", extraHeaders: AirPlayStreamSetup.streamHeaders)
         print("Opening audio data connection...")
-        let audioStream = AirPlayAudioStream(host: host, port: NWEndpoint.Port(rawValue: UInt16(setupResult.dataPort))!, sharedKey: sharedKey)
+        let audioStream = AirPlayAudioStream(host: host, port: NWEndpoint.Port(rawValue: UInt16(setupResult.dataPort))!, sharedKey: sharedKey, nonceStrategy: nonceStrategy, aadStrategy: aadStrategy)
         try await audioStream.connect()
         print("Audio data connection established. Encoding + streaming a \(durationSeconds)s 440Hz tone...")
 
@@ -198,7 +210,7 @@ case "tone":
                     print("  chunk \(chunkIndex): skipping \(frame.count)-byte priming artifact")
                     continue
                 }
-                print("  chunk \(chunkIndex): sending frame #\(timestamp / UInt32(encoder.samplesPerFrame)) size=\(frame.count) bytes")
+                print("  chunk \(chunkIndex): sending frame #\(timestamp / UInt32(encoder.samplesPerFrame)) size=\(frame.count) bytes first8=\(frame.prefix(8).map { String(format: "%02x", $0) }.joined())")
                 try await audioStream.sendFrame(aacData: frame, timestamp: timestamp)
                 timestamp += UInt32(encoder.samplesPerFrame)
             }
