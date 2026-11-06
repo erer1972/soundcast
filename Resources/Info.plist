@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>SoundCast</string>
+	<key>CFBundleDisplayName</key>
+	<string>SoundCast</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.soundcast.app</string>
+	<key>CFBundleExecutable</key>
+	<string>SoundCast</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<!-- Menu-bar-only app: no Dock icon, no app menu bar of its own. -->
+	<key>LSUIElement</key>
+	<true/>
+	<!-- Drives the one-time system consent prompt for the Core Audio
+	     process-tap capture (design doc §2) — same family of prompt as
+	     microphone access, worded for what we're actually doing. -->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>SoundCast needs to capture system audio so it can play what you're hearing on the speakers and rooms you select.</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.2</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Personal project — not for distribution.</string>
+</dict>
+</plist>

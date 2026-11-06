@@ -1,0 +1,257 @@
+import SwiftUI
+import SoundCastCore
+
+/// The floating desktop panel's contents (design: "SoundCast Widget"
+/// mockup). Compact shows casting state, master volume and active
+/// devices; expanded adds per-source switches and per-device volume.
+/// Choosing which devices are ticked stays in the menu bar window.
+struct WidgetPanelView: View {
+    @ObservedObject var state: AppState
+    @ObservedObject var controller: FloatingPanelController
+
+    private let accent = Color(red: 1.0, green: 0.48, blue: 0.35)
+    private let live = Color(red: 0.43, green: 0.91, blue: 0.78)
+
+    private var volumePercent: Int { Int((state.masterVolume * 100).rounded()) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            if controller.isExpanded { expanded } else { compact }
+        }
+        .padding(14)
+        .frame(
+            width: controller.isExpanded ? FloatingPanelController.expandedSize.width : FloatingPanelController.compactSize.width,
+            height: controller.isExpanded ? FloatingPanelController.expandedSize.height : FloatingPanelController.compactSize.height
+        )
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(.white.opacity(0.14)))
+        .preferredColorScheme(.dark)
+        .tint(accent)
+    }
+
+    // MARK: - Pieces
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(state.isCasting ? live : .secondary)
+                .frame(width: 8, height: 8)
+            Text("SoundCast")
+                .font(.system(size: 12, weight: .semibold))
+            Spacer()
+            Button {
+                controller.setExpanded(!controller.isExpanded)
+            } label: {
+                Image(systemName: controller.isExpanded ? "chevron.up" : "chevron.down")
+            }
+            .buttonStyle(.plain)
+            .help(controller.isExpanded ? "Collapse" : "Expand")
+            Button {
+                controller.hide()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .help("Hide panel (bring it back from the menu bar icon)")
+            Toggle("Casting", isOn: Binding(get: { state.isCasting }, set: { state.setCasting($0) }))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+        }
+        .foregroundStyle(.primary)
+    }
+
+    private var statusBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(state.isCasting ? "Casting" : "Paused")
+                .font(.system(size: 15, weight: .semibold))
+            Text(subtitle)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private var subtitle: String {
+        guard state.isCasting else { return "Switch on to resume" }
+        let n = state.activeDevices.count
+        if n == 0 { return "No devices ticked" }
+        return n == 1 ? "1 device" : "\(n) devices"
+    }
+
+    private var masterSlider: some View {
+        Slider(
+            value: Binding(get: { Double(state.masterVolume) }, set: { state.setMasterVolume(Float($0)) }),
+            in: 0...1
+        )
+        .accessibilityLabel("Master volume")
+    }
+
+    private var bigVolume: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 2) {
+            Text("\(volumePercent)")
+                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .monospacedDigit()
+            Text("%")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - Compact
+
+    private var compact: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading) {
+                    statusBlock
+                    Spacer(minLength: 0)
+                    bigVolume
+                }
+                .frame(width: 118, alignment: .leading)
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 9) {
+                    if state.activeDevices.isEmpty {
+                        Text(state.isCasting ? "Tick a device in the menu bar." : "—")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(state.activeDevices.prefix(3)) { device in
+                            DeviceLine(device: device, active: state.isCasting)
+                        }
+                        if state.activeDevices.count > 3 {
+                            Text("+\(state.activeDevices.count - 3) more")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.top, 8)
+            masterSlider
+        }
+    }
+
+    // MARK: - Expanded
+
+    private var expanded: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .bottom) {
+                statusBlock
+                Spacer()
+                bigVolume
+            }
+            .padding(.top, 8)
+            masterSlider.padding(.top, 2)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    SectionLabel("Sources")
+                    ForEach(AppState.allSources, id: \.self) { source in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Toggle(source.displayName, isOn: Binding(
+                                get: { state.isActive(source) },
+                                set: { state.setActive(source, on: $0) }
+                            ))
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .font(.system(size: 13, weight: .medium))
+                            if let error = state.lastErrorBySource[source] {
+                                Text(error)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(state.isActive(source) ? Color.secondary : Color.red)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+
+                    ForEach(AppState.allSources.filter { state.isActive($0) }, id: \.self) { source in
+                        let devices = state.selectedDevices(for: source)
+                        if !devices.isEmpty {
+                            SectionLabel("Devices · \(source.displayName)")
+                            ForEach(devices) { device in
+                                VStack(alignment: .leading, spacing: 0) {
+                                    HStack {
+                                        Text(device.name).font(.system(size: 13, weight: .medium))
+                                        Text(device.category.rawValue)
+                                            .font(.system(size: 10.5))
+                                            .padding(.horizontal, 6).padding(.vertical, 1)
+                                            .background(.white.opacity(0.12), in: Capsule())
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                    }
+                                    Slider(
+                                        value: Binding(
+                                            get: { Double(state.perDeviceGainBySource[source]?[device.id] ?? 1.0) },
+                                            set: { state.setGain(for: device, source: source, gain: Float($0)) }
+                                        ),
+                                        in: 0...1
+                                    )
+                                    .accessibilityLabel("\(device.name) volume")
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+    }
+}
+
+private struct SectionLabel: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text.uppercased())
+            .font(.system(size: 10.5, weight: .semibold))
+            .tracking(0.8)
+            .foregroundStyle(.secondary)
+            .padding(.top, 8)
+    }
+}
+
+private struct DeviceLine: View {
+    let device: SoundDevice
+    let active: Bool
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(device.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                Text(device.category.rawValue).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            EqBars(active: active)
+        }
+    }
+}
+
+/// Five small level bars: moving while casting, flat and grey when paused
+/// (and static when Reduce Motion is on).
+private struct EqBars: View {
+    let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.12, paused: !active || reduceMotion)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .bottom, spacing: 3) {
+                ForEach(0..<5, id: \.self) { i in
+                    let level: Double = active
+                        ? (reduceMotion ? 0.7 : 0.25 + 0.75 * abs(sin(t * 2.4 + Double(i) * 1.3)))
+                        : 0.25
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(active ? Color(red: 0.43, green: 0.91, blue: 0.78) : Color.white.opacity(0.25))
+                        .frame(width: 4, height: 22 * level)
+                }
+            }
+            .frame(height: 22, alignment: .bottom)
+        }
+        .accessibilityHidden(true)
+    }
+}

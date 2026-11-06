@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleExecutable</key>
+	<string>SoundCast</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.soundcast.hal.driver</string>
+	<key>CFBundleName</key>
+	<string>SoundCast</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<!-- CFPlugInDynamicRegistration=NO means the factory below is loaded
+	     eagerly rather than via a registration function we'd also have
+	     to implement. -->
+	<key>CFPlugInDynamicRegistration</key>
+	<string>NO</string>
+	<!-- Key = an arbitrary UUID identifying *this factory function*
+	     (not the interface type) — minted fresh, doesn't need to match
+	     anything else. Value = the C function name in driver.c — kept
+	     as its original "SoundCastNullDriver_Create" name even after
+	     the bundle itself was renamed from the go/no-go test's name to
+	     the real "SoundCast", since the C symbol name is independent of
+	     CFBundleExecutable and this already proved correct — no reason
+	     to risk a typo renaming something that works. -->
+	<key>CFPlugInFactories</key>
+	<dict>
+		<key>5D8E4C2A-6B1F-4A3E-9C2D-1F7A3E9B2C44</key>
+		<string>SoundCastNullDriver_Create</string>
+	</dict>
+	<!-- Key = kAudioServerPlugInTypeUUID in canonical string form,
+	     copied from the raw bytes in the real SDK header
+	     (44 3A BA B8 E7 B3 49 1A B9 85 BE B9 18 70 30 DB) — this is
+	     NOT arbitrary, it has to be this exact value for coreaudiod to
+	     recognize this bundle as a HAL driver type at all. Value = the
+	     list of factory UUIDs (just the one above) that can produce it. -->
+	<key>CFPlugInTypes</key>
+	<dict>
+		<key>443ABAB8-E7B3-491A-B985-BEB9187030DB</key>
+		<array>
+			<string>5D8E4C2A-6B1F-4A3E-9C2D-1F7A3E9B2C44</string>
+		</array>
+	</dict>
+</dict>
+</plist>

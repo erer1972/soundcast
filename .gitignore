@@ -1,0 +1,6 @@
+.build/
+dist/
+*.o
+*.dSYM/
+.DS_Store
+.soundcast_build_keychain.pass
