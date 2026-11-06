@@ -746,12 +746,36 @@ isn't repeated:
     they're cheap and commonly documented as required by other
     receivers.
   - Still unverified: what the event connection is actually *for*
-    beyond existing, and the exact framing/encryption of the audio
-    itself sent to `dataPort` (the 32-byte `shk` key from SETUP phase 2
-    is negotiated but nothing has been encrypted with it yet — no audio
-    has been sent). That's the next piece: AAC-LC encoding (via
-    AudioToolbox) of the existing capture ring buffer, packetized and
-    encrypted for `dataPort`.
+    beyond existing.
+- **Audio data channel (`dataPort`) — implemented, blocked on an
+  unexplained real-device rejection.** Built the full pipeline: an
+  AAC-LC encoder (`AACEncoder.swift`, via `AVAudioConverter`, 48kHz
+  capture → 44.1kHz AAC-LC matching the declared `audioFormat`) and the
+  packet framing/encryption from a real receiver's decryption code
+  (`AirPlayAudioStream.swift`): `[u16 BE length][seq:4][timestamp:4]
+  [ssrc:4][ChaCha20-Poly1305 ciphertext][16-byte tag][8-byte nonce
+  suffix]`, keyed directly by the 32-byte `shk` negotiated in SETUP
+  phase 2 (no HKDF).
+  - A real crash was found and fixed along the way: `NWConnection` can
+    report a terminal state (e.g. `.failed`) more than once for the
+    same connection attempt, double-resuming a `CheckedContinuation`
+    and crashing the process. Now guarded in both
+    `AirPlayRTSPConnection` and `AirPlayAudioStream`.
+  - Independently verified correct, several ways, before concluding
+    this is a real wall rather than another findable bug: a live
+    packet capture confirmed the bytes actually sent match the intended
+    layout exactly, field-by-field; the `shk` sent during SETUP matches
+    byte-for-byte what's used to encrypt; a local round-trip
+    self-decrypt of every sent frame succeeds.
+  - Despite all of that: the real Apple TV TCP-ACKs the first data
+    packet, then immediately RSTs the connection (confirmed via packet
+    capture — not a timeout or keepalive issue; it happens within
+    milliseconds, after exactly one 212-byte packet). This means either
+    the real device's buffered-audio protocol differs from
+    `openairplay2`'s documented behavior (itself never verified against
+    real Apple hardware, only against its own author's receiver
+    testing) in some way not yet found, or the decoded AAC content
+    itself (not the framing) is what's actually rejected. Not resolved.
 
 ### 12.6 Questions that change the plan
 
