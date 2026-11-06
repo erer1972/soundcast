@@ -73,14 +73,27 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
     }
 
     public func connect() async throws {
+        // NWConnection can report a terminal state (e.g. .failed) more
+        // than once for the same attempt — resume exactly once
+        // regardless (see AirPlayAudioStream.connect()'s identical
+        // guard, added after this exact double-resume crashed the
+        // process live).
+        final class ResumeGuard: @unchecked Sendable {
+            var didResume = false
+        }
+        let resumeGuard = ResumeGuard()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.stateUpdateHandler = { state in
+                guard !resumeGuard.didResume else { return }
                 switch state {
                 case .ready:
+                    resumeGuard.didResume = true
                     continuation.resume()
                 case .failed(let error):
+                    resumeGuard.didResume = true
                     continuation.resume(throwing: ConnectionError.connectFailed("\(error)"))
                 case .cancelled:
+                    resumeGuard.didResume = true
                     continuation.resume(throwing: ConnectionError.connectFailed("cancelled"))
                 default:
                     break

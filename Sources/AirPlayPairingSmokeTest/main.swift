@@ -135,8 +135,96 @@ case "stream":
     }
     connection.close()
 
+case "tone":
+    let port = args.count >= 4 ? (UInt16(args[3]) ?? 7000) : 7000
+    let durationSeconds = args.count >= 5 ? (Double(args[4]) ?? 5.0) : 5.0
+    let connection = try await connect(port: port)
+    do {
+        print("Running pair-verify...")
+        let keys = try await AirPlayPairVerify.run(connection: connection, identity: identity)
+        connection.enableEncryption(readKey: keys.readKey, writeKey: keys.writeKey)
+        let sessionUUID = UUID().uuidString
+        let requestTarget = "rtsp://[\(address)]/\(sessionUUID)"
+        _ = try await connection.send(method: "OPTIONS", path: requestTarget)
+        var sharedKey = [UInt8](repeating: 0, count: 32)
+        for i in 0..<32 { sharedKey[i] = UInt8.random(in: 0...255) }
+        let host = NWEndpoint.Host("\(address)%\(interfaceName)")
+        print("Running RTSP SETUP...")
+        let setupResult = try await AirPlayStreamSetup.run(
+            connection: connection, host: host, requestTarget: requestTarget, sessionUUID: sessionUUID, sharedKey: sharedKey
+        )
+        print("SETUP ok: dataPort=\(setupResult.dataPort)")
+        print("Running RECORD...")
+        try await AirPlayStreamSetup.record(connection: connection, requestTarget: requestTarget)
+        print("RECORD ok. Sending initial /feedback...")
+        // A real macOS sender's encrypted control channel sent a small
+        // periodic request (~87 bytes) roughly every 2s, captured earlier
+        // this session before IPv6 was understood to be the real
+        // channel — almost certainly POST /feedback (a real endpoint per
+        // a real receiver's own dispatch table). Never implemented until
+        // now; the data connection dying after exactly one real frame is
+        // consistent with the receiver treating a silent sender as dead.
+        _ = try await connection.send(method: "POST", path: "/feedback", extraHeaders: AirPlayStreamSetup.streamHeaders)
+        print("Opening audio data connection...")
+        let audioStream = AirPlayAudioStream(host: host, port: NWEndpoint.Port(rawValue: UInt16(setupResult.dataPort))!, sharedKey: sharedKey)
+        try await audioStream.connect()
+        print("Audio data connection established. Encoding + streaming a \(durationSeconds)s 440Hz tone...")
+
+        let encoder = try AACEncoder()
+        let inputSampleRate = 48_000.0
+        let samplesPerChunk = 1024
+        let totalChunks = Int(durationSeconds * inputSampleRate / Double(samplesPerChunk))
+        var timestamp: UInt32 = 0
+        var phase: Float = 0
+        let frequency: Float = 440
+        let twoPiFOverSR = 2 * Float.pi * frequency / Float(inputSampleRate)
+
+        for chunkIndex in 0..<totalChunks {
+            var samples = [Float](repeating: 0, count: samplesPerChunk * 2)
+            for i in 0..<samplesPerChunk {
+                let value = sin(phase) * 0.3
+                samples[i * 2] = value
+                samples[i * 2 + 1] = value
+                phase += twoPiFOverSR
+                if phase > 2 * Float.pi { phase -= 2 * Float.pi }
+            }
+            let frames = try encoder.encode(interleavedSamples: samples)
+            for frame in frames {
+                // AVAudioConverter's very first output frame, seen live,
+                // was 6 bytes — an encoder priming artifact, not a real
+                // AAC-LC frame (real ones here run ~150-250 bytes).
+                // Sending it got the connection reset by the receiver.
+                guard frame.count >= 20 else {
+                    print("  chunk \(chunkIndex): skipping \(frame.count)-byte priming artifact")
+                    continue
+                }
+                print("  chunk \(chunkIndex): sending frame #\(timestamp / UInt32(encoder.samplesPerFrame)) size=\(frame.count) bytes")
+                try await audioStream.sendFrame(aacData: frame, timestamp: timestamp)
+                timestamp += UInt32(encoder.samplesPerFrame)
+            }
+            // ~2s cadence at 1024 samples/48kHz per chunk (~21.3ms each).
+            if chunkIndex > 0 && chunkIndex % 94 == 0 {
+                _ = try await connection.send(method: "POST", path: "/feedback", extraHeaders: AirPlayStreamSetup.streamHeaders)
+            }
+            // Pace roughly real-time so we don't flood the TCP buffer.
+            try await Task.sleep(nanoseconds: UInt64(Double(samplesPerChunk) / inputSampleRate * 1_000_000_000))
+        }
+        print("\nPASS: streamed \(totalChunks) chunks. Did you hear a 440Hz tone on the device?")
+        audioStream.close()
+        setupResult.eventConnection.close()
+    } catch AirPlayStreamSetup.StreamError.unexpectedStatus(let code, let body) {
+        print("\nFAIL: unexpected status \(code), body (\(body.count) bytes): \(String(data: Data(body), encoding: .utf8) ?? body.map { String(format: "%02x", $0) }.joined())")
+        connection.close()
+        exit(1)
+    } catch {
+        print("\nFAIL: \(error)")
+        connection.close()
+        exit(1)
+    }
+    connection.close()
+
 default:
-    print("Unknown mode \"\(mode)\" — use \"verify\", \"setup\", or \"stream\".")
+    print("Unknown mode \"\(mode)\" — use \"verify\", \"setup\", \"stream\", or \"tone\".")
     exit(1)
 }
 exit(0)

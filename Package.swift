@@ -67,6 +67,7 @@ let package = Package(
                 .linkedFramework("Network"),
                 .linkedFramework("CryptoKit"),
                 .linkedFramework("Security"),
+                .linkedFramework("AVFAudio"),
             ]
         ),
         .executableTarget(

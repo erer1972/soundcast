@@ -39,7 +39,7 @@ public enum AirPlayStreamSetup {
     /// pairing (SETUP, RECORD, SET_PARAMETER, ...), used for remote-
     /// control device matching — commonly documented as required by
     /// receivers even when remote control itself isn't used.
-    static let streamHeaders: [String: String] = [
+    public static let streamHeaders: [String: String] = [
         "DACP-ID": "1A2B3C4D5E6F7788",
         "Active-Remote": "1986535575",
     ]
@@ -102,6 +102,15 @@ public enum AirPlayStreamSetup {
         ]
         let phase2Body: [String: Any] = ["streams": [streamDict]]
         let phase2Data = try PropertyListSerialization.data(fromPropertyList: phase2Body, format: .binary, options: 0)
+        if ProcessInfo.processInfo.environment["DEBUG_AUDIO"] != nil {
+            let shkHex = sharedKey.map { String(format: "%02x", $0) }.joined()
+            FileHandle.standardError.write("[SETUP DEBUG] shk sent (len=\(sharedKey.count))=\(shkHex)\n".data(using: .utf8)!)
+            if let roundTrip = try? PropertyListSerialization.propertyList(from: phase2Data, options: [], format: nil) as? [String: Any],
+               let streams = roundTrip["streams"] as? [[String: Any]],
+               let shkData = streams.first?["shk"] as? Data {
+                FileHandle.standardError.write("[SETUP DEBUG] shk round-tripped through plist (len=\(shkData.count))=\(shkData.map { String(format: "%02x", $0) }.joined())\n".data(using: .utf8)!)
+            }
+        }
         let phase2Response = try await connection.send(
             method: "SETUP", path: requestTarget,
             extraHeaders: streamHeaders.merging(["Content-Type": "application/x-apple-binary-plist"]) { _, new in new },
@@ -121,6 +130,25 @@ public enum AirPlayStreamSetup {
         }
 
         return Result(eventConnection: eventConnection, dataPort: dataPort, controlPort: controlPort)
+    }
+
+    /// Tells the receiver how to map audio timestamps to real playback
+    /// time — per a real AirPlay 2 *receiver*'s dispatch table, this is
+    /// its own RTSP method (not a SET_PARAMETER), and the receiver only
+    /// actually reads `rate` and `rtpTime` from the body. `rtpTime`
+    /// should be the timestamp of the first audio frame about to be
+    /// sent; `rate` is 1.0 for normal playback.
+    public static func setRateAnchorTime(connection: AirPlayRTSPConnection, requestTarget: String, rtpTime: UInt32) async throws {
+        let body: [String: Any] = ["rate": 1.0, "rtpTime": rtpTime]
+        let data = try PropertyListSerialization.data(fromPropertyList: body, format: .binary, options: 0)
+        let response = try await connection.send(
+            method: "SETRATEANCHORTIME", path: requestTarget,
+            extraHeaders: streamHeaders.merging(["Content-Type": "application/x-apple-binary-plist"]) { _, new in new },
+            body: Array(data)
+        )
+        guard response.statusCode == 200 else {
+            throw StreamError.unexpectedStatus(response.statusCode, response.body)
+        }
     }
 
     public static func record(connection: AirPlayRTSPConnection, requestTarget: String) async throws {
