@@ -98,8 +98,45 @@ case "setup":
     }
     connection.close()
 
+case "stream":
+    let port = args.count >= 4 ? (UInt16(args[3]) ?? 7000) : 7000
+    let connection = try await connect(port: port)
+    do {
+        print("Running pair-verify...")
+        let keys = try await AirPlayPairVerify.run(connection: connection, identity: identity)
+        connection.enableEncryption(readKey: keys.readKey, writeKey: keys.writeKey)
+        let sessionUUID = UUID().uuidString
+        // IPv6 literal in a URI authority needs bracket notation, or the
+        // address's own colons are ambiguous with the URI's port syntax.
+        let requestTarget = "rtsp://[\(address)]/\(sessionUUID)"
+        print("Encrypted channel up. Trying OPTIONS first...")
+        let optionsResponse = try await connection.send(method: "OPTIONS", path: requestTarget)
+        print("OPTIONS -> status \(optionsResponse.statusCode), headers \(optionsResponse.headers)")
+        print("Running RTSP SETUP...")
+        var sharedKey = [UInt8](repeating: 0, count: 32)
+        for i in 0..<32 { sharedKey[i] = UInt8.random(in: 0...255) }
+        let host = NWEndpoint.Host("\(address)%\(interfaceName)")
+        let setupResult = try await AirPlayStreamSetup.run(
+            connection: connection, host: host, requestTarget: requestTarget, sessionUUID: sessionUUID, sharedKey: sharedKey
+        )
+        print("SETUP ok (event connection open): dataPort=\(setupResult.dataPort) controlPort=\(setupResult.controlPort)")
+        print("Running RECORD...")
+        try await AirPlayStreamSetup.record(connection: connection, requestTarget: requestTarget)
+        print("\nPASS: SETUP + RECORD both succeeded.")
+        setupResult.eventConnection.close()
+    } catch AirPlayStreamSetup.StreamError.unexpectedStatus(let code, let body) {
+        print("\nFAIL: unexpected status \(code), body (\(body.count) bytes): \(String(data: Data(body), encoding: .utf8) ?? body.map { String(format: "%02x", $0) }.joined())")
+        connection.close()
+        exit(1)
+    } catch {
+        print("\nFAIL: \(error)")
+        connection.close()
+        exit(1)
+    }
+    connection.close()
+
 default:
-    print("Unknown mode \"\(mode)\" — use \"verify\" or \"setup\".")
+    print("Unknown mode \"\(mode)\" — use \"verify\", \"setup\", or \"stream\".")
     exit(1)
 }
 exit(0)

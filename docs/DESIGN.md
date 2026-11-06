@@ -719,6 +719,39 @@ isn't repeated:
      (`openairplay2`'s SRP module, itself checked against
      shairport-sync's own fork) against the exact bytes captured from a
      live, failed attempt.
+- **Encrypted control channel after pair-verify — verified first try.**
+  ChaCha20-Poly1305 framing per public research (2-byte little-endian
+  length as AAD, up to 1024 bytes ciphertext, 16-byte tag, nonce = 4
+  zero bytes + an 8-byte little-endian per-direction counter). Enabled
+  it immediately after a real pair-verify and sent a real `GET /info`
+  through it — got back a real `200` with a correctly decrypted
+  1411-byte body on the first attempt, no iteration needed.
+- **RTSP SETUP (phases 1+2) and RECORD — verified end-to-end**, reverse-
+  engineered live against the real Apple TV rather than from any
+  confirmed sender-side reference (none was found; `openairplay2` is a
+  *receiver*, which only told us what to expect back, not what to
+  send). Each fix came from reading the real rejection:
+  - `400` (empty body, request rejected outright) until the phase-1
+    plist's `timingProtocol` was `"PTP"` instead of `"NTP"` — this
+    device apparently won't negotiate NTP at all.
+  - Phase 2 requests stream `type=103` ("buffered") — a plain TCP data
+    port instead of UDP/RTP, which sidesteps implementing PTP timing
+    sync entirely. Confirmed accepted live.
+  - RECORD then `500`'d (request accepted, receiver-side failure) until
+    a real TCP connection was opened to the `eventPort` phase 1
+    returned *before* sending RECORD — nothing is sent over that
+    connection, its mere presence while RECORD is sent is what mattered.
+  - `OPTIONS` before `SETUP` and `DACP-ID`/`Active-Remote` headers
+    turned out not to matter for this device, but are kept since
+    they're cheap and commonly documented as required by other
+    receivers.
+  - Still unverified: what the event connection is actually *for*
+    beyond existing, and the exact framing/encryption of the audio
+    itself sent to `dataPort` (the 32-byte `shk` key from SETUP phase 2
+    is negotiated but nothing has been encrypted with it yet — no audio
+    has been sent). That's the next piece: AAC-LC encoding (via
+    AudioToolbox) of the existing capture ring buffer, packetized and
+    encrypted for `dataPort`.
 
 ### 12.6 Questions that change the plan
 
