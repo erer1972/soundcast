@@ -53,6 +53,7 @@ let package = Package(
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("ServiceManagement"),
+                .linkedFramework("Network"),
             ]
         ),
         .executableTarget(
@@ -103,6 +104,18 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AudioToolbox"),
+            ]
+        ),
+        // Phase 2 step 1 test (design doc §12): Bonjour discovery of
+        // _airplay._tcp receivers only — no pairing/connection yet. See
+        // Sources/AirPlayDiscoverySmokeTest/main.swift.
+        .executableTarget(
+            name: "AirPlayDiscoverySmokeTest",
+            dependencies: ["SoundCastCore"],
+            path: "Sources/AirPlayDiscoverySmokeTest",
+            swiftSettings: westmereSwiftFlags,
+            linkerSettings: [
+                .linkedFramework("Network"),
             ]
         ),
     ]

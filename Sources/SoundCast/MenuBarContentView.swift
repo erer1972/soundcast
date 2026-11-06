@@ -137,21 +137,37 @@ private struct DeviceRow: View {
     @ObservedObject var state: AppState
 
     var isSelected: Bool { state.selectedDeviceIDsBySource[source]?.contains(device.id) ?? false }
+    // AirPlay/Sonos entries are discovered (design doc §12 step 1) but
+    // not yet wired to any actual output (that's step 4) — show them,
+    // but don't let the user tick a box that would silently do nothing.
+    var isInteractive: Bool { device.category == .thisMac || device.category == .bluetooth }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Button {
-                state.toggleDevice(device, for: source)
-            } label: {
+            if isInteractive {
+                Button {
+                    state.toggleDevice(device, for: source)
+                } label: {
+                    HStack {
+                        Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                        Text(device.name)
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.plain)
+            } else {
                 HStack {
-                    Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                        .foregroundStyle(.secondary)
                     Text(device.name)
                     Spacer()
+                    Text("coming soon")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .buttonStyle(.plain)
 
-            if isSelected {
+            if isSelected && isInteractive {
                 Slider(
                     value: Binding(
                         get: { Double(state.perDeviceGainBySource[source]?[device.id] ?? 1.0) },

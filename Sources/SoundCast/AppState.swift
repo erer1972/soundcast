@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 import SoundCastCore
@@ -68,6 +69,30 @@ final class AppState: ObservableObject {
     @Published var lastErrorBySource: [CastSource: String] = [:]
 
     private var runningSessions: [CastSource: RunningSession] = [:]
+
+    // Design doc §12 Phase 2 step 1: Bonjour discovery feeds `airplayDevices`
+    // (already-existing published property, previously always empty) so
+    // found rooms show up in the same grouped device list the UI already
+    // renders. Not yet wired to actual output — see DeviceRow's
+    // `isInteractive` check in MenuBarContentView.swift.
+    private let airPlayDiscovery = AirPlayDiscovery()
+    private var cancellables: Set<AnyCancellable> = []
+
+    init() {
+        airPlayDiscovery.$receivers
+            .sink { [weak self] receivers in
+                self?.airplayDevices = receivers.map { receiver in
+                    SoundDevice(
+                        id: "airplay:\(receiver.id)",
+                        name: receiver.name,
+                        category: .airplay,
+                        audioObjectID: nil
+                    )
+                }
+            }
+            .store(in: &cancellables)
+        airPlayDiscovery.start()
+    }
 
     func isActive(_ source: CastSource) -> Bool { activeSources.contains(source) }
 

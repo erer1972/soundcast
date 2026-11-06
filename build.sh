@@ -30,6 +30,7 @@ EXECUTABLE="${BIN_PATH}/${APP_NAME}"
 SMOKETEST_EXECUTABLE="${BIN_PATH}/LocalOutputSmokeTest"
 CAPTURETEST_EXECUTABLE="${BIN_PATH}/CaptureSmokeTest"
 VIRTUALDEVICETEST_EXECUTABLE="${BIN_PATH}/VirtualDeviceSmokeTest"
+AIRPLAYDISCOVERYTEST_EXECUTABLE="${BIN_PATH}/AirPlayDiscoverySmokeTest"
 
 # --- Design doc §8: hard gate, not just a compiler-flag promise -----------
 # Disassemble the actual build product and refuse to proceed if it
@@ -59,6 +60,7 @@ check_binary_for_avx "$EXECUTABLE" || AVX_CHECK_FAILED=1
 check_binary_for_avx "$SMOKETEST_EXECUTABLE" || AVX_CHECK_FAILED=1
 check_binary_for_avx "$CAPTURETEST_EXECUTABLE" || AVX_CHECK_FAILED=1
 check_binary_for_avx "$VIRTUALDEVICETEST_EXECUTABLE" || AVX_CHECK_FAILED=1
+check_binary_for_avx "$AIRPLAYDISCOVERYTEST_EXECUTABLE" || AVX_CHECK_FAILED=1
 if [ "$AVX_CHECK_FAILED" -ne 0 ]; then
   echo "Build FAILED the Westmere baseline check. See design doc §8 — check" >&2
   echo "that no dependency or vendored C source is being built without" >&2
@@ -74,6 +76,7 @@ cp Resources/Info.plist "${APP_BUNDLE}/Contents/Info.plist"
 cp "$SMOKETEST_EXECUTABLE" "dist/LocalOutputSmokeTest"
 cp "$CAPTURETEST_EXECUTABLE" "dist/CaptureSmokeTest"
 cp "$VIRTUALDEVICETEST_EXECUTABLE" "dist/VirtualDeviceSmokeTest"
+cp "$AIRPLAYDISCOVERYTEST_EXECUTABLE" "dist/AirPlayDiscoverySmokeTest"
 
 echo "== Signing with local identity '${IDENTITY_NAME}' =="
 # The keychain's unlock state doesn't reliably persist across separate
@@ -93,6 +96,7 @@ codesign --verify --verbose "${APP_BUNDLE}"
 codesign --force --sign "${IDENTITY_NAME}" --timestamp=none "dist/CaptureSmokeTest"
 codesign --force --sign "${IDENTITY_NAME}" --timestamp=none "dist/LocalOutputSmokeTest"
 codesign --force --sign "${IDENTITY_NAME}" --timestamp=none "dist/VirtualDeviceSmokeTest"
+codesign --force --sign "${IDENTITY_NAME}" --timestamp=none "dist/AirPlayDiscoverySmokeTest"
 
 echo
 echo "Built: ${APP_BUNDLE}"
