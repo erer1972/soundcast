@@ -691,17 +691,34 @@ isn't repeated:
   `Content-Type`) gets a `500` with an empty body from a real Apple TV;
   matching real senders' `X-Apple-HKP`, `X-Apple-Client-Name`, and
   `X-Apple-PD` headers was required to get a real `200` with a real TLV8 M2.
-- **Pair-setup is implemented from public research only — not yet verified
-  live.** Every live attempt this session was rejected by the receiver's own
-  access-control gate before the SRP exchange itself ever ran: the Apple TV
-  returned a custom `470 Connection Authorization Required`, the Sonos
-  speaker a plain `403 Forbidden` — even after setting the Apple TV's "Allow
-  Access" to "Anyone on the Same Network." A genuine `/pair-pin-start` does
-  work (confirmed: triggered a real 4-digit PIN on the TV's screen), but
-  pairing still wasn't unlocked by that alone with the headers/sequencing
-  tried so far — there is more to the real flow than two sequential RTSP
-  calls. Treat every SRP/TLV8/HKDF constant in `AirPlayPairSetup.swift` as a
-  documented hypothesis, not a confirmed fact, until a live run succeeds.
+- **Pair-setup is now fully verified end-to-end against the real Apple TV.**
+  A fresh SoundCast identity, never seen by the device before, completed the
+  whole SRP-6a + M5/M6 LTPK exchange and the device accepted it; a follow-up
+  pair-verify using the now-persisted identity then succeeded too (session
+  keys derived), proving the pairing genuinely stuck rather than just
+  "no error was thrown." Two real things had to be found and fixed first,
+  neither guessed — both from comparing live-captured intermediate values
+  against an independent Python reimplementation:
+  1. **Access control, not a protocol bug:** the Apple TV's custom
+     `470 Connection Authorization Required` (and Sonos's plain `403`)
+     reject pair-setup from any sender the device hasn't been told to
+     expect, regardless of the "Allow Access" setting. `/pair-pin-start`
+     only actually displays a PIN if its triggering connection stays open
+     afterward — closing it right away silently suppresses the PIN with
+     no error, which is why early attempts looked like a dead end. The
+     real flow: trigger pair-pin-start, keep that connection open, read
+     the PIN off the screen, run the SRP exchange on the *same*
+     connection.
+  2. **A real SRP math bug:** the M1 client proof must hash `g`/`N`/`A`/`B`
+     as their *minimal* big-endian bytes, not padded to the group's
+     384-byte length — padding only belongs in computing `k` and `u`.
+     Padding `g` (the single byte `0x05`) out to 384 mostly-zero bytes
+     before hashing produced a completely different digest, which the
+     device correctly rejected every time until this was found by
+     cross-checking a public AirPlay sender reference
+     (`openairplay2`'s SRP module, itself checked against
+     shairport-sync's own fork) against the exact bytes captured from a
+     live, failed attempt.
 
 ### 12.6 Questions that change the plan
 

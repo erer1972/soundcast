@@ -11,6 +11,14 @@ import Security
 /// the SRP exchange itself ever ran).
 struct SRP6a {
     static let N: BigUInt = {
+        // RFC 5054 Appendix A's own 3072-bit group value, copied straight
+        // from the RFC text and verified by byte length (768 hex chars =
+        // 3072 bits). An earlier version of this constant was wrong —
+        // apparently misremembered rather than copied, missing a long
+        // run of digits in the middle — which silently broke every SRP
+        // computation (same-length-looking B from a real device, but
+        // every M1/M2 proof mismatched) until caught by fetching the
+        // actual RFC text and diffing against it.
         let hex = """
         FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC7\
         4020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F1\
@@ -19,9 +27,14 @@ struct SRP6a {
         163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F3\
         56208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C329\
         05E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9\
-        DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AACA\
-        A68FFFFFFFFFFFFFFFF
+        DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AAAC\
+        42DAD33170D04507A33A85521ABDF1CBA64ECFB850458DBEF0A8AEA71575\
+        D060C7DB3970F85A6E1E4C7ABF5AE8CDB0933D71E8C94E04A25619DCEE3D2\
+        261AD2EE6BF12FFA06D98A0864D87602733EC86A64521F2B18177B200CBB\
+        E117577A615D6C770988C0BAD946E208E24FA074E5AB3143DB5BFCE0FD10\
+        8E4B82D120A93AD2CAFFFFFFFFFFFFFFFF
         """.replacingOccurrences(of: "\n", with: "")
+        precondition(hex.count == 768, "RFC 5054 3072-bit N must be exactly 768 hex characters")
         return BigUInt(hex, radix: 16)!
     }()
     static let g = BigUInt(5)
@@ -33,6 +46,18 @@ struct SRP6a {
             bytes = [UInt8](repeating: 0, count: byteLength - bytes.count) + bytes
         }
         return bytes
+    }
+
+    /// Minimal (unpadded) big-endian bytes — as opposed to `pad`'s fixed
+    /// 384-byte form. PAD() is only used for k and u's inputs; M1, the
+    /// server-proof check, and K all use each value's natural byte
+    /// length. Confirmed the hard way: hashing `g` (value 5, one byte)
+    /// padded to 384 bytes for the M1 computation produced a proof the
+    /// real device always rejected — the public openairplay2 reference
+    /// (itself checked against shairport-sync's own SRP fork) hashes
+    /// `g`, `N`, `A`, and `B` as minimal bytes everywhere except k/u.
+    static func minimal(_ value: BigUInt) -> [UInt8] {
+        [UInt8](value.serialize())
     }
 
     static func hash(_ chunks: [[UInt8]]) -> [UInt8] {
@@ -94,14 +119,14 @@ struct SRP6a {
         let base = (B + N - kv) % N
         let exponent = session.a + (u * x)
         let S = base.power(exponent, modulus: N)
-        let K = hash([pad(S)])
+        let K = hash([minimal(S)])
 
-        let hN = hash([pad(N)])
-        let hg = hash([pad(g)])
+        let hN = hash([minimal(N)])
+        let hg = hash([minimal(g)])
         let hNxorHg = zip(hN, hg).map { $0 ^ $1 }
         let hI = hash([usernameBytes])
-        let proofM1 = hash([hNxorHg, hI, salt, pad(session.A), pad(B), K])
-        let proofM2 = hash([pad(session.A), proofM1, K])
+        let proofM1 = hash([hNxorHg, hI, salt, minimal(session.A), minimal(B), K])
+        let proofM2 = hash([minimal(session.A), proofM1, K])
 
         return Result(proofM1: proofM1, sessionKeyK: K, expectedServerProofM2: proofM2, publicKeyA: pad(session.A))
     }

@@ -6,21 +6,33 @@ import Foundation
 /// authenticated by the PIN the receiver displays on screen after a
 /// `/pair-pin-start` request.
 ///
-/// *** NOT YET VERIFIED AGAINST A LIVE DEVICE. *** Every live attempt
-/// this session (design doc §12) was rejected by the receiver's own
-/// access-control gate — an Apple TV returned a custom RTSP status
-/// `470 Connection Authorization Required`, a Sonos speaker returned a
-/// plain `403 Forbidden` — before the SRP exchange itself ever ran, even
-/// after setting the Apple TV's "Allow Access" to "Anyone on the Same
-/// Network" and successfully triggering `/pair-pin-start` (confirmed: a
-/// real 4-digit PIN did appear on the TV's screen, meaning that part of
-/// the real protocol genuinely exists and responds to a bare RTSP POST).
-/// What's implemented below — the message shapes, TLV8 tags, HKDF
-/// salt/info strings, SRP group and hash choice — is the best-effort HAP
-/// pair-setup flow from public research, not bytes confirmed on the
-/// wire. Treat every constant here as a hypothesis to re-verify once a
-/// full Swift AirPlay sender (closer to what a real receiver expects
-/// than this session's raw Python probes were) can complete a live run.
+/// **Verified end-to-end against a real Apple TV** (design doc §12.5):
+/// a fresh SoundCast identity, never seen by the device before, ran this
+/// full flow — SRP-6a key exchange, M5/M6 LTPK exchange with Ed25519
+/// signature verification both directions — and the device accepted it;
+/// a subsequent pair-verify using the now-persisted identity succeeded
+/// too, proving the pairing actually stuck.
+///
+/// Getting here needed two real fixes, both found by cross-checking an
+/// independent Python reimplementation against live-captured
+/// intermediate values rather than guessing:
+/// 1. **The receiver's own access-control gate** (a custom
+///    `470 Connection Authorization Required` from the Apple TV) blocks
+///    pair-setup from any sender the device hasn't been told to expect.
+///    `/pair-pin-start` only actually displays a PIN if its triggering
+///    connection is kept open afterward — closing it right away
+///    silently suppresses the PIN with no error. The real flow is:
+///    trigger pair-pin-start, keep that connection open, read the PIN
+///    off the device's screen, then run the SRP exchange on that same
+///    connection.
+/// 2. **A real math bug**, not a wrong assumption: the SRP "M1" client
+///    proof must hash `g`, `N`, `A`, and `B` as their *minimal*
+///    big-endian bytes, not padded to the group's 384-byte length —
+///    padding is only correct for computing `k` and `u`. Hashing `g`
+///    (the single byte `0x05`) padded to 384 mostly-zero bytes produced
+///    a completely different digest than the real device expected,
+///    which an independent Python SRP reimplementation (cross-checked
+///    against a public AirPlay sender reference) caught.
 public enum AirPlayPairSetup {
     public enum PairSetupError: Error {
         case rejected(errorCode: UInt8)
@@ -30,14 +42,35 @@ public enum AirPlayPairSetup {
         case signatureVerificationFailed
     }
 
+    /// Triggers the receiver to display a PIN on screen. Confirmed live:
+    /// this only actually shows a PIN if the triggering connection is
+    /// kept open afterward — closing it right away (as a short-lived
+    /// probe would) silently suppresses the PIN, with no error telling
+    /// you so. Call this, read the PIN off the device, then call
+    /// `completeSetup` on the *same* still-open connection.
+    public static func startPinFlow(connection: AirPlayRTSPConnection) async throws {
+        _ = try await connection.send(method: "POST", path: "/pair-pin-start")
+    }
+
+    /// Convenience wrapper for when the setup code is already known in
+    /// advance (e.g. a fixed/transient code) and there's no need to
+    /// pause for a human to read a screen between the two steps.
     public static func run(
         connection: AirPlayRTSPConnection,
         identity: AirPlayIdentity,
         setupCode: String,
         transient: Bool
     ) async throws {
-        _ = try await connection.send(method: "POST", path: "/pair-pin-start")
+        try await startPinFlow(connection: connection)
+        try await completeSetup(connection: connection, identity: identity, setupCode: setupCode, transient: transient)
+    }
 
+    public static func completeSetup(
+        connection: AirPlayRTSPConnection,
+        identity: AirPlayIdentity,
+        setupCode: String,
+        transient: Bool
+    ) async throws {
         var m1 = TLV8()
         m1.set(TLV8Tag.state, byte: 1)
         m1.set(TLV8Tag.method, byte: 0)
