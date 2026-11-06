@@ -637,7 +637,73 @@ accepts transient pairing and what it wants for timing before writing crypto.
   stable across rebuilds, as with audio capture.
 - **No private API, no paid account** (unchanged).
 
-### 12.4 Questions that change the plan
+### 12.5 Status (2026-11-06): 2a done, 2c partially done and verified
+
+**2a (discovery) — done, validated on real hardware.** `AirPlayDiscovery.swift`
+browses `_airplay._tcp` via `NWBrowser`. One real gotcha: plain
+`NWBrowser.Descriptor.bonjour(type:domain:)` resolves endpoints but its
+`Result.metadata` always comes back `.none` — getting the TXT record (needed
+for `model`/`features`/`pk`) requires the dedicated
+`.bonjourWithTXTRecord(type:domain:)` case instead, confirmed against the real
+Network.framework swiftinterface on the Mac Pro after the plain form silently
+found devices with empty metadata. Found "Living Room" (excluded per policy),
+"kaan", and "Sonos" on the real LAN with correct model/feature parsing.
+
+**2c (pairing) — pair-verify done and verified; pair-setup implemented but
+not yet verified live.** This took real detective work, recorded here so it
+isn't repeated:
+
+- The actual AirPlay control connection uses the receiver's **IPv6
+  link-local address** (`fe80::...`), not its IPv4 address — five separate
+  `tcpdump` attempts filtered on IPv4 found nothing but mDNS chatter despite
+  confirmed real audio playing, until checking `netstat -an` on the Mac Pro
+  directly revealed the real `ESTABLISHED` connection was `tcp6` to a
+  `fe80::` address. AWDL (Apple's peer-to-peer Wi-Fi) was a red herring —
+  tried and ruled out before finding the real answer.
+- Captured a real pair-verify exchange (macOS's own AirPlay sender talking to
+  an already-paired Apple TV) and decoded it byte-for-byte: M1 = TLV8
+  `{State=1, PublicKey=<32 bytes>}` (37 bytes total), M2 = TLV8
+  `{EncryptedData=<120 bytes>, State=2, PublicKey=<32 bytes>}` (159 bytes),
+  M3 = TLV8 `{EncryptedData=<120 bytes>, State=3}` (125 bytes), M4 = TLV8
+  `{State=4}` (3 bytes). Matches public HAP research exactly. The real
+  sender tried `X-Apple-HKP: 6` first, got a 6-byte TLV8 rejection
+  (`Error=4, State=2`), and fell back to `X-Apple-HKP: 3`, which succeeded —
+  this is a protocol-version negotiation header, not part of the TLV8 body.
+- Implemented in `Sources/SoundCastCore/`: `TLV8.swift` (codec),
+  `AirPlayRTSPConnection.swift` (RTSP-over-TCP, Content-Length framed, shared
+  by pair-verify/pair-setup/future RTSP SETUP+RECORD), `AirPlayIdentity.swift`
+  (persistent Ed25519 keypair + pairing ID, stored in Application Support),
+  `AirPlayPairVerify.swift`, `AirPlayPairSetup.swift`, `SRP6a.swift` (needs
+  correct 3072-bit modular exponentiation for pair-setup; added
+  `attaswift/BigInt`, a well-known MIT-licensed dependency, rather than
+  hand-rolling that — approved explicitly rather than assumed).
+- **Pair-verify is fully verified against real hardware**, not just "it
+  compiled": ran the real Swift implementation against both the Apple TV and
+  the Sonos speaker. Both cleanly rejected it with TLV8 `Error=2`
+  (Authentication) — exactly the expected outcome, since SoundCast's identity
+  has never been paired with either device. Critically, reaching that clean
+  rejection required the implementation's ChaCha20-Poly1305 decryption of the
+  server's M2 `EncryptedData` to actually succeed first (wrong HKDF
+  salt/info strings or nonce construction would have thrown an AEAD
+  authentication failure before ever getting that far) — real cryptographic
+  interop confirmed, not merely "no exception was thrown."
+  One real-world gotcha fixed along the way: a bare pair-verify POST (just
+  `Content-Type`) gets a `500` with an empty body from a real Apple TV;
+  matching real senders' `X-Apple-HKP`, `X-Apple-Client-Name`, and
+  `X-Apple-PD` headers was required to get a real `200` with a real TLV8 M2.
+- **Pair-setup is implemented from public research only — not yet verified
+  live.** Every live attempt this session was rejected by the receiver's own
+  access-control gate before the SRP exchange itself ever ran: the Apple TV
+  returned a custom `470 Connection Authorization Required`, the Sonos
+  speaker a plain `403 Forbidden` — even after setting the Apple TV's "Allow
+  Access" to "Anyone on the Same Network." A genuine `/pair-pin-start` does
+  work (confirmed: triggered a real 4-digit PIN on the TV's screen), but
+  pairing still wasn't unlocked by that alone with the headers/sequencing
+  tried so far — there is more to the real flow than two sequential RTSP
+  calls. Treat every SRP/TLV8/HKDF constant in `AirPlayPairSetup.swift` as a
+  documented hypothesis, not a confirmed fact, until a live run succeeds.
+
+### 12.6 Questions that change the plan
 
 1. Which Apple TV (model, tvOS version) and which speakers do you want to cast to
    first? A HomePod, an older Apple TV, and a current Apple TV 4K can behave very

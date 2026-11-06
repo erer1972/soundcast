@@ -29,6 +29,14 @@ let package = Package(
     // requirement at compile time — bumped to .v15 to clear that, which
     // is still far below both real target machines' Tahoe (26.x).
     platforms: [.macOS(.v15)],
+    dependencies: [
+        // SRP-6a (AirPlay/HomeKit pair-setup, design doc §12) needs
+        // correct, non-trivial modular exponentiation over 3072-bit
+        // integers — reimplementing that by hand risks subtle
+        // correctness/timing bugs in security-sensitive code, so this
+        // one well-known, audited dependency is worth it.
+        .package(url: "https://github.com/attaswift/BigInt.git", from: "5.3.0"),
+    ],
     targets: [
         // Swift can't call shm_open directly (it's declared variadic in
         // Darwin's headers; Swift refuses to bridge any variadic C
@@ -46,7 +54,10 @@ let package = Package(
         // needing SwiftUI/AppKit or a full .app bundle around it.
         .target(
             name: "SoundCastCore",
-            dependencies: ["CSoundCastSHM"],
+            dependencies: [
+                "CSoundCastSHM",
+                .product(name: "BigInt", package: "BigInt"),
+            ],
             path: "Sources/SoundCastCore",
             swiftSettings: westmereSwiftFlags,
             linkerSettings: [
@@ -54,6 +65,8 @@ let package = Package(
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("ServiceManagement"),
                 .linkedFramework("Network"),
+                .linkedFramework("CryptoKit"),
+                .linkedFramework("Security"),
             ]
         ),
         .executableTarget(
@@ -116,6 +129,20 @@ let package = Package(
             swiftSettings: westmereSwiftFlags,
             linkerSettings: [
                 .linkedFramework("Network"),
+            ]
+        ),
+        // Phase 2 step 2 test (design doc §12): exercises the real
+        // AirPlayRTSPConnection/TLV8/pair-verify wire protocol against a
+        // real AirPlay 2 receiver. See
+        // Sources/AirPlayPairingSmokeTest/main.swift.
+        .executableTarget(
+            name: "AirPlayPairingSmokeTest",
+            dependencies: ["SoundCastCore"],
+            path: "Sources/AirPlayPairingSmokeTest",
+            swiftSettings: westmereSwiftFlags,
+            linkerSettings: [
+                .linkedFramework("Network"),
+                .linkedFramework("CryptoKit"),
             ]
         ),
     ]
