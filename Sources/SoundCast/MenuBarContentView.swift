@@ -174,6 +174,11 @@ private struct DeviceRow: View {
                 }
             }
 
+            if device.category == .airplay {
+                AirPlayPairingControls(device: device, state: state)
+                    .padding(.leading, 22)
+            }
+
             if isSelected && isInteractive {
                 Slider(
                     value: Binding(
@@ -185,5 +190,57 @@ private struct DeviceRow: View {
                 .padding(.leading, 22)
             }
         }
+    }
+}
+
+/// "Pair…" for a room that rejected SoundCast's identity, then a PIN field
+/// once the receiver is showing its code (design doc §12.5: the PIN only
+/// appears while the triggering connection stays open).
+private struct AirPlayPairingControls: View {
+    let device: SoundDevice
+    @ObservedObject var state: AppState
+    @State private var pin = ""
+
+    var body: some View {
+        if let pairing = state.pairing, pairing.deviceID == device.id {
+            switch pairing.step {
+            case .requestingPIN:
+                Text("Asking \(device.name) to show a PIN…").font(.caption2).foregroundStyle(.secondary)
+            case .waitingForPIN:
+                HStack(spacing: 6) {
+                    TextField("PIN shown on \(device.name)", text: $pin)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 140)
+                        .onSubmit { submit() }
+                    Button("Pair") { submit() }
+                        .disabled(pin.trimmingCharacters(in: .whitespaces).count < 4)
+                    Button("Cancel") { state.cancelPairing() }
+                }
+                .font(.caption)
+            case .verifying:
+                Text("Pairing…").font(.caption2).foregroundStyle(.secondary)
+            case .failed(let message):
+                HStack(spacing: 6) {
+                    Text(message).font(.caption2).foregroundStyle(.red)
+                    Button("Try again") {
+                        state.cancelPairing()
+                        state.beginPairing(device)
+                    }
+                    .font(.caption2)
+                }
+            }
+        } else if state.unpairedAirPlayDevices.contains(device.id) {
+            Button("Pair with SoundCast…") {
+                pin = ""
+                state.beginPairing(device)
+            }
+            .font(.caption2)
+            .disabled(state.pairing != nil)
+        }
+    }
+
+    private func submit() {
+        guard pin.trimmingCharacters(in: .whitespaces).count >= 4 else { return }
+        state.submitPairingPIN(pin)
     }
 }

@@ -828,11 +828,25 @@ isn't repeated:
     lost packet. Verified with `SOUNDCAST_DEBUG_DROP_EVERY=50` (holds
     back every 50th packet): over a 10 s cast kaan requested every gap
     and 30 packets were resent, 0 unavailable.
+  - **Long-run drift (2026-11-07, live app over ssh, tap capture → kaan,
+    10-minute run).** The first window started with a thin cushion
+    (0–30 ms, 2 short reads) and the corrector duplicated 299 single
+    frames to rebuild it. Corrections then fell 130 → 47 → 7 → 0 per
+    30 s, and the cushion settled at 960–1696 frames (20–35 ms at
+    48 kHz) with no short reads. The tap clock and the wall clock agree
+    closely on this Mac. The cushion settles at the low-water mark, not
+    the 60 ms target. Priming could aim higher if receivers ever
+    underrun.
+  - **Pairing from the app (built, not yet tried by hand).** A room
+    that fails pair-verify shows "Pair with SoundCast…". That runs
+    `/pair-pin-start` on a connection kept open, shows a PIN field,
+    then `completeSetup`. On success the room starts if it's ticked
+    under a running source. Sonos speakers may need transient pairing
+    (no PIN) instead; that's untested.
   - Still open:
     - multi-receiver sync quality (shared clock, but untested with two
       rooms);
     - long-run drift behaviour;
-    - pair-setup UI;
     - reconnect after a receiver restarts.
 
   Earlier history: buffered `type=103` path (superseded). The

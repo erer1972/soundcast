@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import Network
 import SwiftUI
 import SoundCastCore
 
@@ -79,6 +80,18 @@ final class AppState: ObservableObject {
     @Published var lastErrorBySource: [CastSource: String] = [:]
     /// Per AirPlay device: "Connecting…", "Playing", or an error message.
     @Published var airplayStatus: [String: String] = [:]
+    /// AirPlay devices that failed pair-verify (show a "Pair…" button).
+    @Published var unpairedAirPlayDevices: Set<String> = []
+
+    enum PairingStep: Equatable {
+        case requestingPIN
+        case waitingForPIN
+        case verifying
+        case failed(String)
+    }
+    /// The one pairing in progress (device ID and step), if any.
+    @Published var pairing: (deviceID: String, step: PairingStep)?
+    private var pairingConnection: AirPlayRTSPConnection?
 
     private var runningSessions: [CastSource: RunningSession] = [:]
     private var airplayCasts: [CastSource: [String: AirPlayCast]] = [:]
@@ -453,11 +466,77 @@ final class AppState: ObservableObject {
         let message: String
         if case AirPlayRealtimeSender.SenderError.notPaired = error {
             message = "Not paired with SoundCast yet"
+            unpairedAirPlayDevices.insert(deviceID)
         } else {
             message = "Failed: \(error)"
         }
         stopAirPlay(deviceID: deviceID, source: source)
         airplayStatus[deviceID] = message
+    }
+
+    // MARK: - AirPlay pairing
+
+    /// Step 1: ask the receiver to show a PIN. The connection must stay
+    /// open until `submitPairingPIN` (closing it suppresses the PIN —
+    /// design doc §12.5).
+    func beginPairing(_ device: SoundDevice) {
+        guard pairing == nil, let serviceName = airplayServiceNames[device.id] else { return }
+        pairing = (device.id, .requestingPIN)
+        Task {
+            do {
+                let receiver = try await AirPlayReceiverResolver.resolve(serviceName: serviceName)
+                let connection = AirPlayRTSPConnection(
+                    host: NWEndpoint.Host(receiver.scopedIPv6),
+                    port: NWEndpoint.Port(rawValue: receiver.port)!
+                )
+                try await connection.connect()
+                try await AirPlayPairSetup.startPinFlow(connection: connection)
+                guard pairing?.deviceID == device.id else {
+                    connection.close()
+                    return
+                }
+                pairingConnection = connection
+                pairing = (device.id, .waitingForPIN)
+            } catch {
+                pairing = (device.id, .failed("Couldn't reach \(device.name): \(error)"))
+            }
+        }
+    }
+
+    /// Step 2: complete pair-setup with the PIN shown on the receiver.
+    func submitPairingPIN(_ pin: String) {
+        guard let current = pairing, current.step == .waitingForPIN, let connection = pairingConnection else { return }
+        let deviceID = current.deviceID
+        pairing = (deviceID, .verifying)
+        Task {
+            do {
+                try await AirPlayPairSetup.completeSetup(
+                    connection: connection, identity: airplayIdentity,
+                    setupCode: pin.trimmingCharacters(in: .whitespaces), transient: false
+                )
+                connection.close()
+                pairingConnection = nil
+                pairing = nil
+                unpairedAirPlayDevices.remove(deviceID)
+                airplayStatus[deviceID] = "Paired"
+                // Start right away if this room is ticked under a running source.
+                for source in Self.allSources where runningSessions[source] != nil
+                    && selectedDeviceIDsBySource[source]?.contains(deviceID) == true {
+                    startAirPlay(deviceID: deviceID, source: source)
+                }
+            } catch {
+                connection.close()
+                pairingConnection = nil
+                pairing = (deviceID, .failed("Pairing failed — check the PIN and try again."))
+                NSLog("[SoundCast][AppState] pair-setup failed: \(error)")
+            }
+        }
+    }
+
+    func cancelPairing() {
+        pairingConnection?.close()
+        pairingConnection = nil
+        pairing = nil
     }
 
     /// Clean shutdown for app quit: TEARDOWN every AirPlay session (in

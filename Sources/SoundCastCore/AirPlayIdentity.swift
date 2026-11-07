@@ -8,7 +8,8 @@ import Foundation
 /// connection (confirmed by the real pair-verify capture this session:
 /// macOS's pair-verify only succeeds at all *because* the accessory
 /// already recognizes a previously-stored identity from this Mac).
-public struct AirPlayIdentity {
+/// Immutable after creation, so safe to share across concurrency domains.
+public struct AirPlayIdentity: @unchecked Sendable {
     public let pairingID: String
     public let signingKey: Curve25519.Signing.PrivateKey
 
