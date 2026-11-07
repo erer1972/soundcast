@@ -56,6 +56,13 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
     private var streamThread: Thread?
     private var keepAliveTask: Task<Void, Never>?
     private var pendingVolume: Float = 1.0
+    private var audioStream: AirPlayRealtimeAudioStream?
+
+    /// Packets resent on the receiver's request / requests we couldn't
+    /// serve because the packet had already left the history.
+    public var resendStats: (resent: Int, unavailable: Int) {
+        stateLock.withLock { audioStream }?.resendStats ?? (0, 0)
+    }
 
     public init(
         receiver: AirPlayResolvedReceiver,
@@ -255,6 +262,17 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
             audioKey: audioKey,
             initialSequence: UInt16.random(in: 0...UInt16.max)
         )
+
+        stateLock.withLock { audioStream = stream }
+        // Retransmit requests arrive on our control port: 8 bytes,
+        // `80 D5 <2 bytes> <first seq BE16> <count BE16>` (OwnTones'
+        // control_svc_cb). Answered off the streaming thread.
+        controlSocket.startReceiving(queue: DispatchQueue(label: "SoundCast.AirPlay.control")) { packet in
+            guard packet.count >= 8, packet[0] == 0x80, packet[1] == 0xD5 else { return }
+            let first = UInt16(packet[4]) << 8 | UInt16(packet[5])
+            let count = UInt16(packet[6]) << 8 | UInt16(packet[7])
+            stream.resend(first: first, count: count)
+        }
 
         let chunkFrames = max(1, Int(inputSampleRate / 100)) // 10 ms
         let cushionFrames = Int(inputSampleRate * 0.06)

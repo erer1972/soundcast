@@ -59,8 +59,30 @@ public final class AirPlayUDPPort {
         port = UInt16(bigEndian: bound.sin6_port)
     }
 
+    private var readSource: DispatchSourceRead?
+
     deinit {
+        readSource?.cancel()
         Darwin.close(descriptor)
+    }
+
+    /// Delivers each incoming datagram to `handler` on `queue`.
+    public func startReceiving(queue: DispatchQueue, handler: @escaping ([UInt8]) -> Void) {
+        guard readSource == nil else { return }
+        let flags = fcntl(descriptor, F_GETFL)
+        if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+        let source = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: queue)
+        let descriptor = self.descriptor
+        source.setEventHandler {
+            var buffer = [UInt8](repeating: 0, count: 2048)
+            while true {
+                let received = buffer.withUnsafeMutableBytes { recv(descriptor, $0.baseAddress, $0.count, 0) }
+                guard received > 0 else { return }
+                handler(Array(buffer[0..<received]))
+            }
+        }
+        source.resume()
+        readSource = source
     }
 
     public func send(_ bytes: [UInt8], to address: String, port destinationPort: UInt16) throws {

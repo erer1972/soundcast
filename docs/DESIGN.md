@@ -820,8 +820,15 @@ isn't repeated:
     hung. Instead the delegate returns `.terminateCancel`, shuts down,
     and terminates again, with a 3 s cap. Measured live: SIGTERM →
     `TEARDOWN 200` → exit in about 115 ms.
+  - **Retransmits (2026-11-07, verified on kaan).** The receiver
+    requests lost packets on our control port with 8 bytes:
+    `80 D5 xx xx <first seq BE16> <count BE16>`. We keep the last 512
+    sent datagrams (~4 s) and resend them byte-identical on the data
+    port; the nonce is the sequence number, so a resend is exactly the
+    lost packet. Verified with `SOUNDCAST_DEBUG_DROP_EVERY=50` (holds
+    back every 50th packet): over a 10 s cast kaan requested every gap
+    and 30 packets were resent, 0 unavailable.
   - Still open:
-    - retransmit requests (we never resend lost RTP);
     - multi-receiver sync quality (shared clock, but untested with two
       rooms);
     - long-run drift behaviour;

@@ -8,6 +8,13 @@ public final class AirPlayRealtimeAudioStream {
     private let receiverPort: UInt16
     private let audioKey: SymmetricKey
     private var sequence: UInt16
+    /// Recently sent datagrams by sequence number, for answering the
+    /// receiver's retransmit requests (`0xD5`). 512 packets is ~4 s.
+    private var history = [[UInt8]?](repeating: nil, count: 512)
+    private var historySequence = [UInt16](repeating: 0, count: 512)
+    private let lock = NSLock()
+    public private(set) var resentPackets = 0
+    public private(set) var unavailableResends = 0
 
     public init(
         udpPort: AirPlayUDPPort,
@@ -45,8 +52,47 @@ public final class AirPlayRealtimeAudioStream {
         packet.append(contentsOf: sealed.ciphertext)
         packet.append(contentsOf: sealed.tag)
         packet.append(contentsOf: nonceSuffix)
-        try udpPort.send(packet, to: receiverIPv4, port: receiverPort)
+        lock.withLock {
+            let slot = Int(sequence) % history.count
+            history[slot] = packet
+            historySequence[slot] = sequence
+        }
         sequence &+= 1
+        if let dropEvery = Self.debugDropEvery, Int(sequence) % dropEvery == 0 {
+            return // simulated loss; still in history for retransmit
+        }
+        try udpPort.send(packet, to: receiverIPv4, port: receiverPort)
+    }
+
+    /// `SOUNDCAST_DEBUG_DROP_EVERY=N` skips sending every Nth packet, to
+    /// exercise the receiver's retransmit requests on a loss-free LAN.
+    private static let debugDropEvery: Int? = {
+        guard let raw = ProcessInfo.processInfo.environment["SOUNDCAST_DEBUG_DROP_EVERY"],
+              let value = Int(raw), value > 1 else { return nil }
+        return value
+    }()
+
+    public var resendStats: (resent: Int, unavailable: Int) {
+        lock.withLock { (resentPackets, unavailableResends) }
+    }
+
+    /// Resends `count` packets starting at `first` (sequence numbers wrap),
+    /// byte-identical to the originals — the nonce is the sequence number,
+    /// so a resend is exactly the packet that was lost.
+    public func resend(first: UInt16, count: UInt16) {
+        for offset in 0..<min(count, 128) {
+            let wanted = first &+ offset
+            let packet: [UInt8]? = lock.withLock {
+                let slot = Int(wanted) % history.count
+                return historySequence[slot] == wanted ? history[slot] : nil
+            }
+            if let packet {
+                try? udpPort.send(packet, to: receiverIPv4, port: receiverPort)
+                lock.withLock { resentPackets += 1 }
+            } else {
+                lock.withLock { unavailableResends += 1 }
+            }
+        }
     }
 
     private func writeUInt16(_ value: UInt16, to bytes: inout [UInt8], at offset: Int) {

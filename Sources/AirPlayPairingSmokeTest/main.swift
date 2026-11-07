@@ -78,6 +78,8 @@ if args.first == "cast" {
         sender.setVolume(0.5)
         try await Task.sleep(nanoseconds: UInt64((seconds / 2 + 2) * 1e9))
         print("Stopping (TEARDOWN)...")
+        let stats = sender.resendStats
+        print("Retransmits: resent \(stats.resent) packet(s), \(stats.unavailable) unavailable.")
         await sender.stop()
         producerRunning.set(false)
         print("PASS: sender started, streamed, and stopped cleanly.")
