@@ -153,16 +153,24 @@ public final class AirPlayPTPClock: @unchecked Sendable {
         leadMilliseconds: UInt32 = 2_000,
         first: Bool
     ) -> [UInt8] {
+        // Matches OwnTones' sync_packet_ptp_make (a sender that works with
+        // Apple TVs): frame1 is the RTP position that plays at the time in
+        // bytes 8..<16; frame2 is the next RTP timestamp to send minus
+        // 11025. With a 2 s lead that makes frame2 - frame1 = 77175, the
+        // value Shairport Sync expects.
         let leadFrames = UInt32((UInt64(leadMilliseconds) * UInt64(sampleRate)) / 1_000)
-        let playPosition = rtpTimestamp &- leadFrames
-        let frame1 = playPosition &+ 11_035
-        let frame2 = frame1 &+ 77_175
+        let frame1 = rtpTimestamp &- leadFrames
+        let frame2 = rtpTimestamp &- 11_025
         var packet = [UInt8](repeating: 0, count: 28)
         packet[0] = first ? 0x90 : 0x80
         packet[1] = 0xD7
         packet[3] = 0x06
         writeUInt32(frame1, to: &packet, at: 4)
-        writeTimestamp(Self.nowNanoseconds(), to: &packet, at: 8)
+        // Bytes 8..<16 are a plain big-endian u64 nanosecond count on the
+        // PTP clock (Shairport Sync rtp.c reads them with nctoh64), not a
+        // 10-byte PTP 48+32 timestamp. A 10-byte write here produced an
+        // anchor time decades off and spilled into frame2.
+        writeUInt64(Self.nowNanoseconds(), to: &packet, at: 8)
         writeUInt32(frame2, to: &packet, at: 16)
         writeUInt64(clockIdentity, to: &packet, at: 20)
         return packet
@@ -393,7 +401,7 @@ public final class AirPlayPTPClock: @unchecked Sendable {
         return socket
     }
 
-    private static func routeSelectedIPv4(to peer: sockaddr_in) -> String? {
+    static func routeSelectedIPv4(to peer: sockaddr_in) -> String? {
         let socket = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard socket >= 0 else { return nil }
         defer { Darwin.close(socket) }
@@ -424,7 +432,7 @@ public final class AirPlayPTPClock: @unchecked Sendable {
         return String(decoding: bytes, as: UTF8.self)
     }
 
-    private static func hardwareAddress(for ipv4Address: String) -> [UInt8]? {
+    static func hardwareAddress(for ipv4Address: String) -> [UInt8]? {
         var interfaces: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&interfaces) == 0, let first = interfaces else { return nil }
         defer { freeifaddrs(first) }

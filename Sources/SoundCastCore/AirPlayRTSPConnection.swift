@@ -226,7 +226,11 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
             })
         }
 
-        return try await receiveResponse()
+        let response = try await receiveResponse()
+        if ProcessInfo.processInfo.environment["SOUNDCAST_RTSP_TRACE"] != nil {
+            FileHandle.standardError.write(Data("[RTSP] \(method) \(path) -> \(response.statusCode)\n".utf8))
+        }
+        return response
     }
 
     private func receiveResponse() async throws -> Response {

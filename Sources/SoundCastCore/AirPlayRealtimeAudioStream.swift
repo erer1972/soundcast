@@ -26,7 +26,8 @@ public final class AirPlayRealtimeAudioStream {
     public func sendFrame(_ encodedAudio: [UInt8], timestamp: UInt32, isFirst: Bool) throws {
         var header = [UInt8](repeating: 0, count: 12)
         header[0] = 0x80
-        header[1] = isFirst ? 0xE0 : 0x60
+        // OwnTones never sets the marker bit on realtime audio packets.
+        header[1] = 0x60
         writeUInt16(sequence, to: &header, at: 2)
         writeUInt32(timestamp, to: &header, at: 4)
         writeUInt32(0, to: &header, at: 8)

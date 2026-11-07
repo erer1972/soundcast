@@ -747,8 +747,54 @@ isn't repeated:
     receivers.
   - Still unverified: what the event connection is actually *for*
     beyond existing.
-- **Audio data channel (`dataPort`) — still blocked on real-device
-  rejection.** The original AAC-LC attempt was ACKed and then reset by
+- **Audio data channel — WORKING via realtime type-96 (2026-11-07).**
+  A 440 Hz test tone played audibly on `kaan` (AppleTV6,2, tvOS 26.6.1)
+  from the `realtime-setup` smoke test, confirmed by ear on the first
+  run after the IPv6 fix below. Working recipe:
+  pair-verify → `GET /info` → SETUP (session, `timingProtocol: PTP`,
+  `timingPeerInfo`) → open event connection → RECORD → `SETPEERS`
+  (`Content-Type: /peer-list-changed`, bplist array of receiver and
+  sender IPv4) → SETUP (stream `type=96`, `ct=2`, `audioFormat
+  0x40000`, `spf=352`, `shk` = pair-verify ECDH secret) →
+  `SET_PARAMETER volume` → `0xD7` anchor on the control port →
+  ChaCha20-Poly1305 RTP packets (AAD = header bytes 4..<12, nonce =
+  LE seq in an 8-byte suffix) on the data port, paced on absolute
+  deadlines, with our own PTP grandmaster on UDP 319/320.
+  Four bugs had to be fixed; any one of them alone kept it silent:
+  - **Wrong destination family (the decisive one).** RTSP runs over
+    the Apple TV's IPv6 link-local address, and the receiver binds the
+    stream's data/control ports on IPv6 only. We sent RTP to its IPv4
+    address, and a capture showed an ICMP port-unreachable for every
+    audio and control packet. `AirPlayUDPPort` is now dual-stack and
+    RTP goes to the scoped IPv6 address (`fe80::…%en0`). PTP on
+    319/320 still works over IPv4.
+  - **32-bit ALAC.** `mFormatFlags: 0` with Float32 input made Core
+    Audio encode 32-bit ALAC (cookie bitDepth `0x20`, about 1606
+    bytes per 352 frames) while `audioFormat` 0x40000 declares 16-bit.
+    Now `kAppleLosslessFormatFlag_16BitSourceData`, about 200 bytes
+    per packet for a sine. This also invalidates the earlier ALAC
+    attempts on the buffered `type=103` path.
+  - **`0xD7` anchor time encoding.** Bytes 8..<16 are a plain
+    big-endian u64 nanosecond count (Shairport Sync `rtp.c` reads them
+    with `nctoh64`), not a 10-byte PTP timestamp. frame1/frame2 now
+    match OwnTones: `next − 88200` and `next − 11025`.
+  - **Missing `SETPEERS`.** OwnTones and iOS send it between RECORD and
+    the stream SETUP. It was added in the same pass, so whether it is
+    strictly required is untested.
+  - Other findings: `kaan` rejects `timingProtocol: NTP` with 400 at
+    session SETUP, so PTP is required on this tvOS. Its "Signaling"
+    messages carry only Apple org TLVs (`00:0D:93`), not unicast
+    requests, so "0 grants" was never a gap. `kaan` yields to our
+    clock (its priority1 is 248, ours 128) and then only sends
+    Delay_Req.
+  - Not yet done: integrating the realtime path into the app's casting
+    session (live capture → 44.1 kHz → ALAC → RTP), retransmit
+    requests, multi-receiver timing, and teardown. RTP is currently
+    sent to a link-local address supplied on the command line. The
+    app will need to take it from Bonjour resolution.
+
+  Earlier history: buffered `type=103` path (superseded). The
+  original AAC-LC attempt was ACKed and then reset by
   the Apple TV after its first 212-byte packet, as confirmed by packet
   capture. The current smoke test uses ALAC (`ALACEncoder.swift`, via
   `AVAudioConverter`, 48kHz input to 44.1kHz ALAC matching the declared
@@ -804,9 +850,9 @@ isn't repeated:
     URL/streamConnectionID, omits stale RTP-Info on RECORD, and starts
     the RTP timeline at the NTP/Unix epoch two seconds ahead to match the
     PTP anchor lead. SoundCast sent 626 encrypted UDP/RTP packets; the
-    first 352-sample ALAC payload was 1614 bytes. Audio is still not
-    confirmed audible. The realtime path remains a smoke test, not yet
-    integrated into the app's normal casting session.
+    first 352-sample ALAC payload was 1614 bytes (32-bit ALAC, see
+    above). That run was silent; superseded by the working recipe
+    above.
   - The earlier AAC packet capture confirmed the bytes sent matched the
     intended frame layout and showed the receiver ACKing the first
     212-byte packet before resetting the connection. A local

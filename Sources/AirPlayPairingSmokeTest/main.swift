@@ -137,17 +137,32 @@ case "stream":
 
 case "realtime-setup":
     guard args.count >= 4 else {
-        print("Usage: AirPlayPairingSmokeTest realtime-setup <ipv6-link-local-address> <interface-name> <receiver-ipv4> [port]")
+        print("Usage: AirPlayPairingSmokeTest realtime-setup <ipv6-link-local-address> <interface-name> <receiver-ipv4> [port] [seconds] [ptp|ntp]")
         exit(1)
     }
     let receiverIPv4 = args[3]
     let port = args.count >= 5 ? (UInt16(args[4]) ?? 7000) : 7000
     let audioDuration = args.count >= 6 ? (Double(args[5]) ?? 0) : 0
-    let ptpClock = try AirPlayPTPClock(peerIPv4: receiverIPv4)
-    defer { ptpClock.stop() }
-    ptpClock.start()
-    let controlSocket = try AirPlayUDPPort(localAddress: ptpClock.localAddress)
-    let dataSocket = try AirPlayUDPPort(localAddress: ptpClock.localAddress)
+    let useNTP = args.count >= 7 && args[6].lowercased() == "ntp"
+    let ptpClock: AirPlayPTPClock? = useNTP ? nil : try AirPlayPTPClock(peerIPv4: receiverIPv4)
+    let ntpTiming: AirPlayNTPTiming? = useNTP ? try AirPlayNTPTiming(peerIPv4: receiverIPv4) : nil
+    defer { ptpClock?.stop(); ntpTiming?.stop() }
+    ptpClock?.start()
+    ntpTiming?.start()
+    let localIPv4 = ptpClock?.localAddress ?? ntpTiming!.localAddress
+    // RTP audio/control must go to the same (IPv6) address as RTSP: the
+    // receiver binds the stream ports there and rejects IPv4 with ICMP.
+    let streamAddress = "\(address)%\(interfaceName)"
+    let controlSocket = try AirPlayUDPPort(localAddress: localIPv4)
+    let dataSocket = try AirPlayUDPPort(localAddress: localIPv4)
+    /// Sync packet for the control channel; `next` is the next RTP
+    /// timestamp to send, which plays 2 s (88200 frames) after "now".
+    func syncPacket(next: UInt32, first: Bool) -> [UInt8] {
+        if let ntpTiming {
+            return ntpTiming.syncPacket(currentPosition: next &- 88_200, nextTimestamp: next, first: first)
+        }
+        return ptpClock!.realtimeSyncPacket(rtpTimestamp: next, first: first)
+    }
     let connection = try await connect(port: port)
     do {
         print("Running pair-verify...")
@@ -166,7 +181,7 @@ case "realtime-setup":
         guard infoResponse.statusCode == 200 else {
             throw AirPlayStreamSetup.StreamError.unexpectedStatus(infoResponse.statusCode, infoResponse.body)
         }
-        print("Negotiating realtime type=96 with the local PTP clock...")
+        print("Negotiating realtime type=96 with \(useNTP ? "NTP timing on UDP \(ntpTiming!.port)" : "the local PTP clock")...")
         let setupResult = try await AirPlayStreamSetup.run(
             connection: connection,
             host: host,
@@ -174,14 +189,18 @@ case "realtime-setup":
             sessionUUID: sessionUUID,
             sharedKey: audioKey,
             samplesPerFrame: 352,
-            timingProtocol: "PTP",
+            timingProtocol: useNTP ? "NTP" : "PTP",
+            timingPort: ntpTiming?.port,
             ptpClock: ptpClock,
             streamType: 96,
             localControlPort: controlSocket.port,
             localDataPort: dataSocket.port,
             streamConnectionID: streamConnectionID,
-            recordBeforeStream: true
+            recordBeforeStream: true,
+            timingPeers: useNTP ? nil : [receiverIPv4, localIPv4],
+            deviceID: ntpTiming?.deviceID
         )
+        if !useNTP { print("SETPEERS [\(receiverIPv4), \(localIPv4)] accepted.") }
         print("Realtime SETUP accepted: localDataPort=\(dataSocket.port) remoteDataPort=\(setupResult.dataPort) controlPort=\(setupResult.controlPort)")
         let volumeResponse = try await connection.send(
             method: "SET_PARAMETER",
@@ -191,8 +210,12 @@ case "realtime-setup":
         )
         print("SET_PARAMETER volume -> status \(volumeResponse.statusCode)")
         try await Task.sleep(nanoseconds: 3_000_000_000)
-        let probes = ptpClock.probeCounts()
-        print("PTP requests: Delay_Req=\(probes.delayRequests) Pdelay_Req=\(probes.peerDelayRequests) Signaling=\(probes.signalingRequests) grants=\(probes.signalingGrants) types=\(probes.requestedMessageTypes)")
+        if let probes = ptpClock?.probeCounts() {
+            print("PTP requests: Delay_Req=\(probes.delayRequests) Pdelay_Req=\(probes.peerDelayRequests) Signaling=\(probes.signalingRequests)")
+        }
+        if let ntpTiming {
+            print("NTP timing requests answered: \(ntpTiming.requestCount)")
+        }
         if audioDuration > 0 {
             let sampleRate = 44_100.0
             let encoder = try ALACEncoder(
@@ -202,7 +225,7 @@ case "realtime-setup":
             )
             let stream = AirPlayRealtimeAudioStream(
                 udpPort: dataSocket,
-                receiverIPv4: receiverIPv4,
+                receiverIPv4: streamAddress,
                 receiverPort: UInt16(setupResult.dataPort),
                 audioKey: audioKey,
                 initialSequence: UInt16.random(in: 0...UInt16.max)
@@ -211,11 +234,14 @@ case "realtime-setup":
             let startTime = Date().timeIntervalSince1970 + ntpEpochOffset + 2.0
             var sampleTimestamp = UInt32(truncatingIfNeeded: Int64(startTime * sampleRate))
             try controlSocket.send(
-                ptpClock.realtimeSyncPacket(rtpTimestamp: sampleTimestamp, first: true),
-                to: receiverIPv4,
+                syncPacket(next: sampleTimestamp, first: true),
+                to: streamAddress,
                 port: UInt16(setupResult.controlPort)
             )
             let packetCount = Int(audioDuration * sampleRate / 352.0)
+            // Pace against absolute deadlines so sleep overhead doesn't
+            // accumulate and push the send point behind the anchor.
+            let pacingStart = DispatchTime.now().uptimeNanoseconds
             var phase: Float = 0
             let phaseStep = 2 * Float.pi * 440 / Float(sampleRate)
             for packetIndex in 0..<packetCount {
@@ -234,17 +260,24 @@ case "realtime-setup":
                 sampleTimestamp &+= 352
                 if packetIndex > 0 && packetIndex % 100 == 0 {
                     try controlSocket.send(
-                        ptpClock.realtimeSyncPacket(rtpTimestamp: sampleTimestamp, first: false),
-                        to: receiverIPv4,
+                        syncPacket(next: sampleTimestamp, first: false),
+                        to: streamAddress,
                         port: UInt16(setupResult.controlPort)
                     )
                 }
                 if packetIndex == 0 {
                     print("Sent first realtime ALAC/RTP packet (\(encoded.count) encoded bytes).")
                 }
-                try await Task.sleep(nanoseconds: UInt64(352.0 / sampleRate * 1_000_000_000))
+                let deadline = pacingStart + UInt64(Double(packetIndex + 1) * 352.0 / sampleRate * 1_000_000_000)
+                let now = DispatchTime.now().uptimeNanoseconds
+                if deadline > now {
+                    try await Task.sleep(nanoseconds: deadline - now)
+                }
             }
             print("Sent \(packetCount) realtime audio packet(s).")
+            if let ntpTiming {
+                print("NTP timing requests answered (total): \(ntpTiming.requestCount)")
+            }
         }
         setupResult.eventConnection.close()
     } catch AirPlayStreamSetup.StreamError.unexpectedStatus(let code, let body) {

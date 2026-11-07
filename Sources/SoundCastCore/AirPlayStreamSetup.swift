@@ -70,7 +70,9 @@ public enum AirPlayStreamSetup {
         localControlPort: UInt16? = nil,
         localDataPort: UInt16? = nil,
         streamConnectionID: Int? = nil,
-        recordBeforeStream: Bool = false
+        recordBeforeStream: Bool = false,
+        timingPeers: [String]? = nil,
+        deviceID: String? = nil
     ) async throws -> Result {
         var phase1Body: [String: Any] = [
             "timingProtocol": timingProtocol,
@@ -82,6 +84,9 @@ public enum AirPlayStreamSetup {
         ]
         if let timingPort {
             phase1Body["timingPort"] = Int(timingPort)
+        }
+        if let deviceID {
+            phase1Body["deviceID"] = deviceID
         }
         if let ptpClock {
             let peerInfo = ptpClock.timingPeerInfo
@@ -121,6 +126,9 @@ public enum AirPlayStreamSetup {
                 requestTarget: requestTarget,
                 includeRTPInfo: false
             )
+        }
+        if let timingPeers, !timingPeers.isEmpty {
+            try await setPeers(connection: connection, requestTarget: requestTarget, addresses: timingPeers)
         }
 
         var streamDict: [String: Any] = [
@@ -189,6 +197,26 @@ public enum AirPlayStreamSetup {
         let response = try await connection.send(
             method: "SETRATEANCHORTIME", path: requestTarget,
             extraHeaders: streamHeaders.merging(["Content-Type": "application/x-apple-binary-plist"]) { _, new in new },
+            body: Array(data)
+        )
+        guard response.statusCode == 200 else {
+            throw StreamError.unexpectedStatus(response.statusCode, response.body)
+        }
+    }
+
+    /// Tells a PTP receiver which addresses belong to the timing group.
+    /// OwnTones (a sender known to work with Apple TVs) and iOS send this
+    /// between RECORD and the stream SETUP: a binary-plist array of
+    /// address strings with the odd content type `/peer-list-changed`.
+    public static func setPeers(
+        connection: AirPlayRTSPConnection,
+        requestTarget: String,
+        addresses: [String]
+    ) async throws {
+        let data = try PropertyListSerialization.data(fromPropertyList: addresses, format: .binary, options: 0)
+        let response = try await connection.send(
+            method: "SETPEERS", path: requestTarget,
+            extraHeaders: streamHeaders.merging(["Content-Type": "/peer-list-changed"]) { _, new in new },
             body: Array(data)
         )
         guard response.statusCode == 200 else {

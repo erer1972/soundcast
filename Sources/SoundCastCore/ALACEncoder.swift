@@ -35,7 +35,11 @@ public final class ALACEncoder {
         var outDesc = AudioStreamBasicDescription(
             mSampleRate: outputSampleRate,
             mFormatID: kAudioFormatAppleLossless,
-            mFormatFlags: 0,
+            // Must be explicit: with flags 0 and Float32 input, Core Audio
+            // encodes 32-bit ALAC (cookie bitDepth 0x20, ~1606-byte packets
+            // for 352 frames), but AirPlay's audioFormat 0x40000 tells the
+            // receiver to decode 16-bit. Verified on the Mac Pro 2026-11-07.
+            mFormatFlags: kAppleLosslessFormatFlag_16BitSourceData,
             mBytesPerPacket: 0,
             mFramesPerPacket: AVAudioFrameCount(framesPerPacket),
             mBytesPerFrame: 0,
