@@ -20,10 +20,15 @@ public final class ALACEncoder {
     private let converter: AVAudioConverter
     private let inputFormat: AVAudioFormat
     public let outputFormat: AVAudioFormat
-    /// ALAC's standard frame size (as opposed to AAC-LC's 1024).
-    public let samplesPerFrame: Int = 4096
+    public let samplesPerFrame: Int
 
-    public init(inputSampleRate: Double = 48_000, outputSampleRate: Double = 44_100, channels: AVAudioChannelCount = 2) throws {
+    public init(
+        inputSampleRate: Double = 48_000,
+        outputSampleRate: Double = 44_100,
+        channels: AVAudioChannelCount = 2,
+        framesPerPacket: Int = 4096
+    ) throws {
+        guard framesPerPacket > 0 else { throw EncoderError.formatCreationFailed }
         guard let inFmt = AVAudioFormat(standardFormatWithSampleRate: inputSampleRate, channels: channels) else {
             throw EncoderError.formatCreationFailed
         }
@@ -32,7 +37,7 @@ public final class ALACEncoder {
             mFormatID: kAudioFormatAppleLossless,
             mFormatFlags: 0,
             mBytesPerPacket: 0,
-            mFramesPerPacket: 4096,
+            mFramesPerPacket: AVAudioFrameCount(framesPerPacket),
             mBytesPerFrame: 0,
             mChannelsPerFrame: channels,
             mBitsPerChannel: 0,
@@ -47,6 +52,7 @@ public final class ALACEncoder {
         converter = conv
         inputFormat = inFmt
         outputFormat = outFmt
+        samplesPerFrame = framesPerPacket
     }
 
     /// Encodes one chunk of interleaved Float32 samples (at `inputFormat`'s

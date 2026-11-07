@@ -4,10 +4,11 @@ import Network
 /// AirPlay RTSP SETUP (two phases) and RECORD — establishes the audio
 /// stream after pair-verify's encrypted channel is up.
 ///
-/// **Verified end-to-end against a real Apple TV** (design doc §12.5):
-/// SETUP phase 1, SETUP phase 2 (requesting stream `type=103`,
-/// "buffered" — a plain TCP data port instead of UDP/RTP, which avoids
-/// implementing PTP entirely), and RECORD all succeeded for real.
+/// **Control setup verified end-to-end against a real Apple TV** (design
+/// doc §12.5): both SETUP phases and RECORD succeeded. This does not
+/// validate the audio data path. The current `type=103` buffered stream
+/// uses TCP; Shairport Sync's receiver waits for valid PTP timing before
+/// processing it, so this mode cannot be assumed to avoid PTP.
 /// Reverse-engineered live, by reading each rejection and trying the
 /// next concrete fix rather than guessing blindly — each one was a
 /// real, confirmed requirement:
@@ -23,12 +24,10 @@ import Network
 ///   turned out not to matter for this device — kept anyway since
 ///   they're cheap and commonly documented as required elsewhere.
 ///
-/// Still unconfirmed: what the event connection is actually *for*
-/// (just establishing presence, or does the receiver send something
-/// over it that matters once real audio is flowing) and the exact
-/// framing/encryption of the `dataPort` audio stream itself (the `shk`
-/// 32-byte key is sent but nothing has been decrypted/encrypted with
-/// it yet — no audio has been sent).
+/// Still unresolved: what the event connection is for, whether the
+/// buffered path works with the Apple TV's timing requirements, and
+/// which part of the current data frames makes the receiver reset the
+/// connection.
 public enum AirPlayStreamSetup {
     public enum StreamError: Error {
         case malformedResponse
@@ -63,16 +62,36 @@ public enum AirPlayStreamSetup {
         sessionUUID: String,
         sharedKey: [UInt8],
         audioFormat: Int = 0x0004_0000, // ALAC 44100/16/2 — confirmed from a public AirPlay2 sender's own doc comment
-        samplesPerFrame: Int = 4096 // ALAC's standard frame size
+        samplesPerFrame: Int = 4096, // ALAC's standard frame size
+        timingProtocol: String = "PTP",
+        timingPort: UInt16? = nil,
+        ptpClock: AirPlayPTPClock? = nil,
+        streamType: Int = 103,
+        localControlPort: UInt16? = nil,
+        localDataPort: UInt16? = nil,
+        streamConnectionID: Int? = nil,
+        recordBeforeStream: Bool = false
     ) async throws -> Result {
-        let phase1Body: [String: Any] = [
-            "timingProtocol": "PTP",
+        var phase1Body: [String: Any] = [
+            "timingProtocol": timingProtocol,
             "osName": "macOS",
             "osVersion": "15.0",
             "name": "SoundCast",
             "sessionUUID": sessionUUID,
             "isRemoteControlOnly": false,
         ]
+        if let timingPort {
+            phase1Body["timingPort"] = Int(timingPort)
+        }
+        if let ptpClock {
+            let peerInfo = ptpClock.timingPeerInfo
+            phase1Body["deviceID"] = ptpClock.deviceID
+            phase1Body["macAddress"] = ptpClock.deviceID
+            phase1Body["timingPeerInfo"] = peerInfo
+            phase1Body["timingPeerList"] = [peerInfo]
+            phase1Body["groupUUID"] = sessionUUID
+            phase1Body["groupContainsGroupLeader"] = false
+        }
         let phase1Data = try PropertyListSerialization.data(fromPropertyList: phase1Body, format: .binary, options: 0)
         let phase1Response = try await connection.send(
             method: "SETUP", path: requestTarget,
@@ -96,12 +115,34 @@ public enum AirPlayStreamSetup {
         let eventConnection = AirPlayRTSPConnection(host: host, port: NWEndpoint.Port(rawValue: UInt16(eventPort))!)
         try await eventConnection.connect()
 
-        let streamDict: [String: Any] = [
-            "type": 103, // "buffered" — TCP audio channel, no PTP needed
+        if recordBeforeStream {
+            try await record(
+                connection: connection,
+                requestTarget: requestTarget,
+                includeRTPInfo: false
+            )
+        }
+
+        var streamDict: [String: Any] = [
+            "type": streamType,
             "audioFormat": audioFormat,
             "spf": samplesPerFrame,
             "shk": Data(sharedKey),
         ]
+        if streamType == 96 {
+            streamDict["audioMode"] = "default"
+            streamDict["controlPort"] = Int(localControlPort ?? 0)
+            streamDict["dataPort"] = Int(localDataPort ?? 0)
+            streamDict["ct"] = 2
+            streamDict["isMedia"] = true
+            streamDict["latencyMax"] = 88_200
+            streamDict["latencyMin"] = 11_025
+            streamDict["sr"] = 44_100
+            streamDict["supportsDynamicStreamID"] = false
+            if let streamConnectionID {
+                streamDict["streamConnectionID"] = streamConnectionID
+            }
+        }
         let phase2Body: [String: Any] = ["streams": [streamDict]]
         let phase2Data = try PropertyListSerialization.data(fromPropertyList: phase2Body, format: .binary, options: 0)
         if ProcessInfo.processInfo.environment["DEBUG_AUDIO"] != nil {
@@ -125,11 +166,13 @@ public enum AirPlayStreamSetup {
             from: Data(phase2Response.body), options: [], format: nil
         ) as? [String: Any],
               let streams = phase2Plist["streams"] as? [[String: Any]],
-              let firstStream = streams.first,
-              let dataPort = firstStream["dataPort"] as? Int,
-              let controlPort = firstStream["controlPort"] as? Int else {
+              let firstStream = streams.first else {
             throw StreamError.malformedResponse
         }
+        guard let dataPort = (firstStream["dataPort"] as? Int) ?? (firstStream["serverPort"] as? Int) else {
+            throw StreamError.malformedResponse
+        }
+        let controlPort = (firstStream["controlPort"] as? Int) ?? dataPort
 
         return Result(eventConnection: eventConnection, dataPort: dataPort, controlPort: controlPort)
     }
@@ -153,8 +196,14 @@ public enum AirPlayStreamSetup {
         }
     }
 
-    public static func record(connection: AirPlayRTSPConnection, requestTarget: String) async throws {
-        let recordHeaders = streamHeaders.merging(["RTP-Info": "seq=1;rtptime=0"]) { _, new in new }
+    public static func record(
+        connection: AirPlayRTSPConnection,
+        requestTarget: String,
+        includeRTPInfo: Bool = true
+    ) async throws {
+        let recordHeaders = includeRTPInfo
+            ? streamHeaders.merging(["RTP-Info": "seq=1;rtptime=0"]) { _, new in new }
+            : streamHeaders
         let response = try await connection.send(method: "RECORD", path: requestTarget, extraHeaders: recordHeaders)
         guard response.statusCode == 200 else {
             throw StreamError.unexpectedStatus(response.statusCode, response.body)

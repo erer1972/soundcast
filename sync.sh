@@ -15,6 +15,7 @@
 # instead of overwriting them, unless --force is given. Build output
 # (.build, dist) and compiled test binaries are never copied or deleted.
 set -euo pipefail
+export LC_ALL=C
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 MAC_HOST="${MAC_HOST:-macpro}"

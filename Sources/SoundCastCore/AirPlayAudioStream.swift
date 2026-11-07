@@ -2,8 +2,9 @@ import CryptoKit
 import Foundation
 import Network
 
-/// Sends encrypted AAC-LC frames over the `dataPort` TCP connection AirPlay
-/// RTSP SETUP (stream `type=103`, "buffered") negotiates.
+/// Sends encrypted audio frames over the `dataPort` TCP connection AirPlay
+/// RTSP SETUP (stream `type=103`, "buffered") negotiates. The codec and
+/// sample format are selected separately in the SETUP request.
 ///
 /// *** NOT YET VERIFIED AGAINST A LIVE DEVICE. *** The wire format below
 /// comes from reading a real AirPlay 2 *receiver* implementation's
@@ -82,6 +83,9 @@ public final class AirPlayAudioStream: @unchecked Sendable {
         let resumeGuard = ResumeGuard()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.stateUpdateHandler = { state in
+                if case .failed(let error) = state {
+                    NSLog("[SoundCast][AirPlayAudioStream] connection failed: \(error)")
+                }
                 guard !resumeGuard.didResume else { return }
                 switch state {
                 case .ready:
@@ -102,10 +106,9 @@ public final class AirPlayAudioStream: @unchecked Sendable {
         connection.cancel()
     }
 
-    /// Encrypts and sends one AAC-LC frame. `timestamp` is the running
-    /// sample count at the start of this frame (e.g. incrementing by the
-    /// frame's sample-per-frame count, 1024 for AAC-LC, each call).
-    public func sendFrame(aacData: [UInt8], timestamp: UInt32) async throws {
+    /// Encrypts and sends one encoded audio frame. `timestamp` is the
+    /// running sample count at the start of this frame.
+    public func sendFrame(audioData: [UInt8], timestamp: UInt32) async throws {
         let seq = sequence & 0xFF_FFFF
         sequence += 1
 
@@ -149,18 +152,18 @@ public final class AirPlayAudioStream: @unchecked Sendable {
         case .fullHeader:
             aad = Data(header)
         }
-        let sealed = try ChaChaPoly.seal(aacData, using: key, nonce: nonce, authenticating: aad)
+        let sealed = try ChaChaPoly.seal(audioData, using: key, nonce: nonce, authenticating: aad)
 
         if ProcessInfo.processInfo.environment["DEBUG_AUDIO"] != nil {
             let keyHex = key.withUnsafeBytes { Data($0) }.map { String(format: "%02x", $0) }.joined()
             FileHandle.standardError.write("[AUDIO DEBUG] key=\(keyHex)\n".data(using: .utf8)!)
-            FileHandle.standardError.write("[AUDIO DEBUG] seq=\(seq) timestamp=\(timestamp) ssrc=\(ssrc) aacLen=\(aacData.count)\n".data(using: .utf8)!)
+            FileHandle.standardError.write("[AUDIO DEBUG] seq=\(seq) timestamp=\(timestamp) audioLen=\(audioData.count)\n".data(using: .utf8)!)
             // Round-trip self-check: catches a bug in this code's own
             // use of the CryptoKit API, independent of whether the wire
             // format itself matches what the real receiver expects.
             do {
                 let reopened = try ChaChaPoly.open(sealed, using: key, authenticating: aad)
-                let matches = Array(reopened) == aacData
+                let matches = Array(reopened) == audioData
                 FileHandle.standardError.write("[AUDIO DEBUG] self round-trip decrypt matches original: \(matches)\n".data(using: .utf8)!)
             } catch {
                 FileHandle.standardError.write("[AUDIO DEBUG] self round-trip decrypt FAILED: \(error)\n".data(using: .utf8)!)

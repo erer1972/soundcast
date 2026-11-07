@@ -9,6 +9,7 @@ import SoundCastCore
 // Usage:
 //   AirPlayPairingSmokeTest verify <ipv6-link-local-address> <interface-name> [port]
 //   AirPlayPairingSmokeTest setup <ipv6-link-local-address> <interface-name> <pin> [port]
+//   AirPlayPairingSmokeTest realtime-setup <ipv6-link-local-address> <interface-name> <receiver-ipv4> [port] [audio-seconds]
 
 CPUFeatureGuard.logAndGuard(context: "AirPlayPairingSmokeTest launch")
 
@@ -113,8 +114,7 @@ case "stream":
         let optionsResponse = try await connection.send(method: "OPTIONS", path: requestTarget)
         print("OPTIONS -> status \(optionsResponse.statusCode), headers \(optionsResponse.headers)")
         print("Running RTSP SETUP...")
-        var sharedKey = [UInt8](repeating: 0, count: 32)
-        for i in 0..<32 { sharedKey[i] = UInt8.random(in: 0...255) }
+        let sharedKey = keys.audioKey.withUnsafeBytes { Array($0) }
         let host = NWEndpoint.Host("\(address)%\(interfaceName)")
         let setupResult = try await AirPlayStreamSetup.run(
             connection: connection, host: host, requestTarget: requestTarget, sessionUUID: sessionUUID, sharedKey: sharedKey
@@ -123,6 +123,129 @@ case "stream":
         print("Running RECORD...")
         try await AirPlayStreamSetup.record(connection: connection, requestTarget: requestTarget)
         print("\nPASS: SETUP + RECORD both succeeded.")
+        setupResult.eventConnection.close()
+    } catch AirPlayStreamSetup.StreamError.unexpectedStatus(let code, let body) {
+        print("\nFAIL: unexpected status \(code), body (\(body.count) bytes): \(String(data: Data(body), encoding: .utf8) ?? body.map { String(format: "%02x", $0) }.joined())")
+        connection.close()
+        exit(1)
+    } catch {
+        print("\nFAIL: \(error)")
+        connection.close()
+        exit(1)
+    }
+    connection.close()
+
+case "realtime-setup":
+    guard args.count >= 4 else {
+        print("Usage: AirPlayPairingSmokeTest realtime-setup <ipv6-link-local-address> <interface-name> <receiver-ipv4> [port]")
+        exit(1)
+    }
+    let receiverIPv4 = args[3]
+    let port = args.count >= 5 ? (UInt16(args[4]) ?? 7000) : 7000
+    let audioDuration = args.count >= 6 ? (Double(args[5]) ?? 0) : 0
+    let ptpClock = try AirPlayPTPClock(peerIPv4: receiverIPv4)
+    defer { ptpClock.stop() }
+    ptpClock.start()
+    let controlSocket = try AirPlayUDPPort(localAddress: ptpClock.localAddress)
+    let dataSocket = try AirPlayUDPPort(localAddress: ptpClock.localAddress)
+    let connection = try await connect(port: port)
+    do {
+        print("Running pair-verify...")
+        let keys = try await AirPlayPairVerify.run(connection: connection, identity: identity)
+        connection.enableEncryption(readKey: keys.readKey, writeKey: keys.writeKey)
+        let sessionUUID = UUID().uuidString
+        let streamConnectionID = Int.random(in: 1...Int(UInt32.max))
+        let requestTarget = "rtsp://[\(address)]/\(streamConnectionID)"
+        let host = NWEndpoint.Host("\(address)%\(interfaceName)")
+        let audioKey = keys.audioKey.withUnsafeBytes { Array($0) }
+        let infoResponse = try await connection.send(
+            method: "GET",
+            path: "/info",
+            extraHeaders: ["X-Apple-ProtocolVersion": "1"]
+        )
+        guard infoResponse.statusCode == 200 else {
+            throw AirPlayStreamSetup.StreamError.unexpectedStatus(infoResponse.statusCode, infoResponse.body)
+        }
+        print("Negotiating realtime type=96 with the local PTP clock...")
+        let setupResult = try await AirPlayStreamSetup.run(
+            connection: connection,
+            host: host,
+            requestTarget: requestTarget,
+            sessionUUID: sessionUUID,
+            sharedKey: audioKey,
+            samplesPerFrame: 352,
+            timingProtocol: "PTP",
+            ptpClock: ptpClock,
+            streamType: 96,
+            localControlPort: controlSocket.port,
+            localDataPort: dataSocket.port,
+            streamConnectionID: streamConnectionID,
+            recordBeforeStream: true
+        )
+        print("Realtime SETUP accepted: localDataPort=\(dataSocket.port) remoteDataPort=\(setupResult.dataPort) controlPort=\(setupResult.controlPort)")
+        let volumeResponse = try await connection.send(
+            method: "SET_PARAMETER",
+            path: requestTarget,
+            extraHeaders: AirPlayStreamSetup.streamHeaders.merging(["Content-Type": "text/parameters"]) { _, new in new },
+            body: Array("volume: 0.000000\r\n".utf8)
+        )
+        print("SET_PARAMETER volume -> status \(volumeResponse.statusCode)")
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        let probes = ptpClock.probeCounts()
+        print("PTP requests: Delay_Req=\(probes.delayRequests) Pdelay_Req=\(probes.peerDelayRequests) Signaling=\(probes.signalingRequests) grants=\(probes.signalingGrants) types=\(probes.requestedMessageTypes)")
+        if audioDuration > 0 {
+            let sampleRate = 44_100.0
+            let encoder = try ALACEncoder(
+                inputSampleRate: sampleRate,
+                outputSampleRate: sampleRate,
+                framesPerPacket: 352
+            )
+            let stream = AirPlayRealtimeAudioStream(
+                udpPort: dataSocket,
+                receiverIPv4: receiverIPv4,
+                receiverPort: UInt16(setupResult.dataPort),
+                audioKey: audioKey,
+                initialSequence: UInt16.random(in: 0...UInt16.max)
+            )
+            let ntpEpochOffset = 2_208_988_800.0
+            let startTime = Date().timeIntervalSince1970 + ntpEpochOffset + 2.0
+            var sampleTimestamp = UInt32(truncatingIfNeeded: Int64(startTime * sampleRate))
+            try controlSocket.send(
+                ptpClock.realtimeSyncPacket(rtpTimestamp: sampleTimestamp, first: true),
+                to: receiverIPv4,
+                port: UInt16(setupResult.controlPort)
+            )
+            let packetCount = Int(audioDuration * sampleRate / 352.0)
+            var phase: Float = 0
+            let phaseStep = 2 * Float.pi * 440 / Float(sampleRate)
+            for packetIndex in 0..<packetCount {
+                var samples = [Float](repeating: 0, count: 352 * 2)
+                for frame in 0..<352 {
+                    let value = sin(phase) * 0.3
+                    samples[frame * 2] = value
+                    samples[frame * 2 + 1] = value
+                    phase += phaseStep
+                    if phase >= 2 * Float.pi { phase -= 2 * Float.pi }
+                }
+                guard let encoded = try encoder.encode(interleavedSamples: samples).first else {
+                    throw ALACEncoder.EncoderError.conversionFailed("no 352-frame ALAC packet produced")
+                }
+                try stream.sendFrame(encoded, timestamp: sampleTimestamp, isFirst: packetIndex == 0)
+                sampleTimestamp &+= 352
+                if packetIndex > 0 && packetIndex % 100 == 0 {
+                    try controlSocket.send(
+                        ptpClock.realtimeSyncPacket(rtpTimestamp: sampleTimestamp, first: false),
+                        to: receiverIPv4,
+                        port: UInt16(setupResult.controlPort)
+                    )
+                }
+                if packetIndex == 0 {
+                    print("Sent first realtime ALAC/RTP packet (\(encoded.count) encoded bytes).")
+                }
+                try await Task.sleep(nanoseconds: UInt64(352.0 / sampleRate * 1_000_000_000))
+            }
+            print("Sent \(packetCount) realtime audio packet(s).")
+        }
         setupResult.eventConnection.close()
     } catch AirPlayStreamSetup.StreamError.unexpectedStatus(let code, let body) {
         print("\nFAIL: unexpected status \(code), body (\(body.count) bytes): \(String(data: Data(body), encoding: .utf8) ?? body.map { String(format: "%02x", $0) }.joined())")
@@ -158,8 +281,7 @@ case "tone":
         let sessionUUID = UUID().uuidString
         let requestTarget = "rtsp://[\(address)]/\(sessionUUID)"
         _ = try await connection.send(method: "OPTIONS", path: requestTarget)
-        var sharedKey = [UInt8](repeating: 0, count: 32)
-        for i in 0..<32 { sharedKey[i] = UInt8.random(in: 0...255) }
+        let sharedKey = keys.audioKey.withUnsafeBytes { Array($0) }
         let host = NWEndpoint.Host("\(address)%\(interfaceName)")
         print("Running RTSP SETUP...")
         let setupResult = try await AirPlayStreamSetup.run(
@@ -227,7 +349,7 @@ case "tone":
                     continue
                 }
                 print("  chunk \(chunkIndex): sending frame #\(timestamp / UInt32(encoder.samplesPerFrame)) size=\(frame.count) bytes first8=\(frame.prefix(8).map { String(format: "%02x", $0) }.joined())")
-                try await audioStream.sendFrame(aacData: frame, timestamp: timestamp)
+                try await audioStream.sendFrame(audioData: frame, timestamp: timestamp)
                 timestamp += UInt32(encoder.samplesPerFrame)
             }
             // ~2s cadence at 1024 samples/48kHz per chunk (~21.3ms each).
@@ -252,7 +374,7 @@ case "tone":
     connection.close()
 
 default:
-    print("Unknown mode \"\(mode)\" — use \"verify\", \"setup\", \"stream\", or \"tone\".")
+    print("Unknown mode \"\(mode)\" — use \"verify\", \"setup\", \"stream\", \"realtime-setup\", or \"tone\".")
     exit(1)
 }
 exit(0)

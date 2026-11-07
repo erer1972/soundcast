@@ -747,35 +747,76 @@ isn't repeated:
     receivers.
   - Still unverified: what the event connection is actually *for*
     beyond existing.
-- **Audio data channel (`dataPort`) — implemented, blocked on an
-  unexplained real-device rejection.** Built the full pipeline: an
-  AAC-LC encoder (`AACEncoder.swift`, via `AVAudioConverter`, 48kHz
-  capture → 44.1kHz AAC-LC matching the declared `audioFormat`) and the
-  packet framing/encryption from a real receiver's decryption code
-  (`AirPlayAudioStream.swift`): `[u16 BE length][seq:4][timestamp:4]
-  [ssrc:4][ChaCha20-Poly1305 ciphertext][16-byte tag][8-byte nonce
-  suffix]`, keyed directly by the 32-byte `shk` negotiated in SETUP
-  phase 2 (no HKDF).
-  - A real crash was found and fixed along the way: `NWConnection` can
-    report a terminal state (e.g. `.failed`) more than once for the
-    same connection attempt, double-resuming a `CheckedContinuation`
-    and crashing the process. Now guarded in both
-    `AirPlayRTSPConnection` and `AirPlayAudioStream`.
-  - Independently verified correct, several ways, before concluding
-    this is a real wall rather than another findable bug: a live
-    packet capture confirmed the bytes actually sent match the intended
-    layout exactly, field-by-field; the `shk` sent during SETUP matches
-    byte-for-byte what's used to encrypt; a local round-trip
-    self-decrypt of every sent frame succeeds.
-  - Despite all of that: the real Apple TV TCP-ACKs the first data
-    packet, then immediately RSTs the connection (confirmed via packet
-    capture — not a timeout or keepalive issue; it happens within
-    milliseconds, after exactly one 212-byte packet). This means either
-    the real device's buffered-audio protocol differs from
-    `openairplay2`'s documented behavior (itself never verified against
-    real Apple hardware, only against its own author's receiver
-    testing) in some way not yet found, or the decoded AAC content
-    itself (not the framing) is what's actually rejected. Not resolved.
+- **Audio data channel (`dataPort`) — still blocked on real-device
+  rejection.** The original AAC-LC attempt was ACKed and then reset by
+  the Apple TV after its first 212-byte packet, as confirmed by packet
+  capture. The current smoke test uses ALAC (`ALACEncoder.swift`, via
+  `AVAudioConverter`, 48kHz input to 44.1kHz ALAC matching the declared
+  `audioFormat`) and the packet framing/encryption described by a real
+  receiver's decryption code (`AirPlayAudioStream.swift`): `[u16 BE
+  length][seq:4][timestamp:4][ssrc:4][ChaCha20-Poly1305 ciphertext]
+  [16-byte tag][8-byte nonce suffix]`, keyed directly by the 32-byte
+  `shk` negotiated in SETUP phase 2 (no HKDF).
+  - **Retested live on the Mac Pro against `kaan` (AppleTV6,2),
+    2026-11-07.** Pair-verify and encrypted `GET /info` succeeded;
+    SETUP, data-port connect, RECORD, and `SET_PARAMETER` all returned
+    successfully. The encoder produced ALAC frames of 18067 and 18050
+    bytes. A targeted TCP capture showed kaan acknowledge only through
+    sequence 5713 before sending a reset on the data connection while
+    the first frame was being delivered. The app's first send callback
+    had returned; the next send failed with
+    `POSIXErrorCode(rawValue: 57): Socket is not connected`. Connection
+    state logging also reported
+    `POSIXErrorCode(rawValue: 54): Connection reset by peer`. The same
+    failure reproduced with the default random nonce and timestamp+SSRC
+    AAD, with a counter-based nonce, and with full-header AAD. This
+    capture logged TCP headers only, so it confirms the reset timing but
+    not which encrypted frame field triggered it. Audible playback was
+    not confirmed. A later test using the pair-verify ECDH secret for
+    `shk` instead of a random key failed the same way; key derivation
+    alone is not the fix.
+  - **GitHub comparison (2026-11-07):** the public
+    [airplay2-sender-cpp](https://github.com/akustikrausch/airplay2-sender-cpp)
+    repository's current sender code uses realtime stream `type=96`,
+    UDP/RTP, 352-sample uncompressed ALAC frames, NTP sync, and sends
+    RECORD before stream SETUP. It derives `shk` from the first 32 bytes
+    of the pair-verify secret. This differs materially from SoundCast's
+    `type=103` TCP path and compressed 4096-sample ALAC frames. Its
+    README reports real-device use; this project has not independently
+    validated that implementation.
+  - Shairport Sync's public `type=103` receiver source parses a
+    big-endian TCP length prefix, waits for valid PTP timing, and only
+    reads buffered frames smaller than 16 KiB. SoundCast's current
+    18067-byte encoded frame exceeds that reference receiver's limit.
+    This does not prove the Apple TV uses the same limit, but makes the
+    buffered path, frame size, and missing PTP exchange stronger leads
+    than further nonce/AAD variations.
+  - **Realtime type-96 path tested on kaan, 2026-11-07.** The isolated
+    smoke test does encrypted `GET /info`, advertises the route-selected
+    PTP IPv4 address and timing peer, binds UDP 319/320 and local RTP
+    control/data sockets, sends RECORD before stream SETUP, uses an EUI-64
+    PTP clock ID derived from the route's MAC address, and uses
+    `CLOCK_REALTIME` for PTP timestamps. Kaan accepts setup and sends
+    Delay_Req probes; the latest five-second run observed 22 Delay_Req,
+    0 Pdelay_Req, and 5 Signaling packets. The signaling parser granted
+    0 requests, so unicast grant handling remains a gap. The test sets
+    receiver volume to 0 dB (SET_PARAMETER 200), uses a matching RTSP
+    URL/streamConnectionID, omits stale RTP-Info on RECORD, and starts
+    the RTP timeline at the NTP/Unix epoch two seconds ahead to match the
+    PTP anchor lead. SoundCast sent 626 encrypted UDP/RTP packets; the
+    first 352-sample ALAC payload was 1614 bytes. Audio is still not
+    confirmed audible. The realtime path remains a smoke test, not yet
+    integrated into the app's normal casting session.
+  - The earlier AAC packet capture confirmed the bytes sent matched the
+    intended frame layout and showed the receiver ACKing the first
+    212-byte packet before resetting the connection. A local
+    ChaCha20-Poly1305 self-decrypt also confirmed the sender's own
+    encryption/decryption round trip; neither check establishes that the
+    receiver accepts the current ALAC stream.
+  - A real crash was fixed along the way: `NWConnection` can report a
+    terminal state more than once, which had double-resumed a
+    `CheckedContinuation`. The connection guards now prevent that in
+    both `AirPlayRTSPConnection` and `AirPlayAudioStream`.
 
 ### 12.6 Questions that change the plan
 

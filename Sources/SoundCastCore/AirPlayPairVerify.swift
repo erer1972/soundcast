@@ -37,6 +37,7 @@ public enum AirPlayPairVerify {
     public struct SessionKeys {
         public let readKey: SymmetricKey
         public let writeKey: SymmetricKey
+        public let audioKey: SymmetricKey
     }
 
     public static func run(
@@ -111,7 +112,8 @@ public enum AirPlayPairVerify {
             sharedInfo: Data("Control-Write-Encryption-Key".utf8),
             outputByteCount: 32
         )
-        return SessionKeys(readKey: readKey, writeKey: writeKey)
+        let audioKey = SymmetricKey(data: sharedSecret.withUnsafeBytes { Data($0) })
+        return SessionKeys(readKey: readKey, writeKey: writeKey, audioKey: audioKey)
     }
 
     private static func decodeOrThrow(_ response: AirPlayRTSPConnection.Response) throws -> TLV8 {
