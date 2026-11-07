@@ -1,8 +1,55 @@
 import SwiftUI
 import SoundCastCore
 
+/// Defers quit until AirPlay sessions are torn down, so receivers
+/// stop immediately instead of timing the session out, and turns
+/// SIGTERM (`pkill`, logout) into the same clean quit.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    @MainActor static weak var appState: AppState?
+    private var sigtermSource: DispatchSourceSignal?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            NSLog("[SoundCast] SIGTERM received; quitting cleanly")
+            NSApplication.shared.terminate(nil)
+        }
+        source.resume()
+        sigtermSource = source
+    }
+
+    /// Set once shutdown has run (or timed out), so the re-issued
+    /// terminate goes straight through.
+    @MainActor private var readyToQuit = false
+
+    /// `.terminateLater` can't be used here: while AppKit waits for the
+    /// reply it runs the main run loop in a mode that doesn't drain the
+    /// main queue, so main-actor shutdown work (and any timeout) never
+    /// runs. Confirmed live: the app hung after SIGTERM. Instead, cancel
+    /// this terminate, shut down normally, then terminate again.
+    @MainActor
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        NSLog("[SoundCast] applicationShouldTerminate (casting: \(Self.appState?.isCasting ?? false), ready: \(readyToQuit))")
+        guard !readyToQuit, let state = Self.appState, state.isCasting else { return .terminateNow }
+        let quit = { @MainActor [weak self] in
+            guard let self, !self.readyToQuit else { return }
+            self.readyToQuit = true
+            sender.terminate(nil)
+        }
+        Task { @MainActor in
+            await state.shutdown()
+            quit()
+        }
+        // Never hang quit on a stuck network call.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { quit() }
+        return .terminateCancel
+    }
+}
+
 @main
 struct SoundCastApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var state: AppState
     @StateObject private var panel: FloatingPanelController
 
@@ -27,6 +74,7 @@ struct SoundCastApp: App {
         }
         CPUFeatureGuard.logAndGuard(context: "app launch")
         let appState = AppState()
+        AppDelegate.appState = appState
         _state = StateObject(wrappedValue: appState)
         _panel = StateObject(wrappedValue: FloatingPanelController(state: appState))
     }

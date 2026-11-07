@@ -812,6 +812,14 @@ isn't repeated:
     mid-stream frequency and volume change, and `TEARDOWN` returned
     200. Unpaired receivers show "Not paired with SoundCast yet";
     pair-setup UI is not built.
+  - **Clean quit (2026-11-07, verified over ssh).** Quit and SIGTERM
+    run `AppState.shutdown()`, which sends TEARDOWN to every receiver
+    concurrently, then stops capture so the tap unmutes the Mac.
+    `.terminateLater` can't be used: while AppKit waits for the reply,
+    the main queue isn't drained, so shutdown never ran and the app
+    hung. Instead the delegate returns `.terminateCancel`, shuts down,
+    and terminates again, with a 3 s cap. Measured live: SIGTERM →
+    `TEARDOWN 200` → exit in about 115 ms.
   - Still open:
     - retransmit requests (we never resend lost RTP);
     - multi-receiver sync quality (shared clock, but untested with two

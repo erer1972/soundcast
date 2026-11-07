@@ -460,6 +460,34 @@ final class AppState: ObservableObject {
         airplayStatus[deviceID] = message
     }
 
+    /// Clean shutdown for app quit: TEARDOWN every AirPlay session (in
+    /// parallel, each capped at 2 s by the sender), then stop capture so
+    /// the tap stops muting the Mac's own output.
+    func shutdown() async {
+        let casts = airplayCasts.flatMap { source, casts in casts.values.map { (source, $0) } }
+        airplayCasts.removeAll()
+        for (source, cast) in casts {
+            cast.startTask?.cancel()
+            runningSessions[source]?.ringBuffer.removeMirror(cast.mirror)
+        }
+        NSLog("[SoundCast][AppState] shutdown: tearing down \(casts.count) AirPlay session(s)")
+        // One task per session so the TEARDOWNs run concurrently.
+        let stops = casts.map { _, cast in
+            let startTask = cast.startTask
+            return Task { @MainActor in
+                await startTask?.value
+                await cast.sender?.stop()
+            }
+        }
+        for stop in stops { await stop.value }
+        for source in Self.allSources where isActive(source) {
+            stopSession(source)
+        }
+        ptpClock?.stop()
+        ptpClock = nil
+        NSLog("[SoundCast][AppState] shutdown: done")
+    }
+
     private func sharedPTPClock(firstPeerIPv4: String) throws -> AirPlayPTPClock {
         if let ptpClock { return ptpClock }
         let clock = try AirPlayPTPClock(peerIPv4: firstPeerIPv4)
