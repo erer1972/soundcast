@@ -114,6 +114,29 @@ final class AppState: ObservableObject {
             }
             .store(in: &cancellables)
         airPlayDiscovery.start()
+        setUpLaunchArgumentCasting()
+    }
+
+    /// Test hook for driving the app headless (e.g. over ssh):
+    /// `open SoundCast.app --args --cast-airplay kaan` turns on "Cast
+    /// Everything" and ticks that AirPlay room as soon as Bonjour finds it.
+    private func setUpLaunchArgumentCasting() {
+        let arguments = CommandLine.arguments
+        guard let flag = arguments.firstIndex(of: "--cast-airplay"), flag + 1 < arguments.count else { return }
+        let roomName = arguments[flag + 1]
+        NSLog("[SoundCast][AppState] --cast-airplay: waiting for \"\(roomName)\"")
+        $airplayDevices
+            .compactMap { $0.first { $0.name == roomName } }
+            .first()
+            .sink { [weak self] device in
+                guard let self else { return }
+                NSLog("[SoundCast][AppState] --cast-airplay: casting everything to \"\(roomName)\"")
+                if self.selectedDeviceIDsBySource[.globalTap]?.contains(device.id) != true {
+                    self.toggleDevice(device, for: .globalTap)
+                }
+                self.setActive(.globalTap, on: true)
+            }
+            .store(in: &cancellables)
     }
 
     func isActive(_ source: CastSource) -> Bool { activeSources.contains(source) }
