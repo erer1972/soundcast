@@ -137,10 +137,11 @@ private struct DeviceRow: View {
     @ObservedObject var state: AppState
 
     var isSelected: Bool { state.selectedDeviceIDsBySource[source]?.contains(device.id) ?? false }
-    // AirPlay/Sonos entries are discovered (design doc §12 step 1) but
-    // not yet wired to any actual output (that's step 4) — show them,
-    // but don't let the user tick a box that would silently do nothing.
-    var isInteractive: Bool { device.category == .thisMac || device.category == .bluetooth }
+    // Sonos entries are discovered but not yet wired to any output —
+    // show them, but don't let the user tick a box that would silently
+    // do nothing. AirPlay rooms stream via AirPlayRealtimeSender.
+    var isInteractive: Bool { device.category != .sonos }
+    var airplayStatus: String? { device.category == .airplay ? state.airplayStatus[device.id] : nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -152,6 +153,12 @@ private struct DeviceRow: View {
                         Image(systemName: isSelected ? "checkmark.square.fill" : "square")
                         Text(device.name)
                         Spacer()
+                        if let airplayStatus {
+                            Text(airplayStatus)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
                     }
                 }
                 .buttonStyle(.plain)

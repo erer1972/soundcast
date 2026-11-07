@@ -167,6 +167,21 @@ public final class ProcessTapCapture {
         return objectID
     }
 
+    /// The tap aggregate's nominal rate (follows the system output
+    /// device, so 44.1 or 48 kHz are both possible). 48 kHz if unknown.
+    public var sampleRate: Double {
+        guard aggregateDeviceID != kAudioObjectUnknown else { return 48_000 }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var rate: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        let status = AudioObjectGetPropertyData(aggregateDeviceID, &address, 0, nil, &size, &rate)
+        return status == noErr && rate > 0 ? rate : 48_000
+    }
+
     private func stringProperty(_ objectID: AudioObjectID, selector: AudioObjectPropertySelector) -> String? {
         var address = AudioObjectPropertyAddress(
             mSelector: selector,

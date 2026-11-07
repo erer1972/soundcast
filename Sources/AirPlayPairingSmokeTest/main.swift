@@ -14,6 +14,87 @@ import SoundCastCore
 CPUFeatureGuard.logAndGuard(context: "AirPlayPairingSmokeTest launch")
 
 let args = Array(CommandLine.arguments.dropFirst())
+
+// `cast <bonjour-name> [seconds]`: exercises the production
+// AirPlayRealtimeSender exactly as the app uses it — Bonjour resolve,
+// shared PTP clock, a ring buffer fed like a 48 kHz capture callback
+// (so the 48k → 44.1k resampling path runs), wall-clock pacing, volume
+// change mid-stream, and TEARDOWN. Plays 440 Hz, then 660 Hz at half
+// volume for the second half.
+if args.first == "cast" {
+    guard args.count >= 2 else {
+        print("Usage: AirPlayPairingSmokeTest cast <bonjour-name> [seconds]")
+        exit(1)
+    }
+    let seconds = args.count >= 3 ? (Double(args[2]) ?? 10) : 10
+    let identity = AirPlayIdentity.loadOrCreate()
+    do {
+        print("Resolving \"\(args[1])\"...")
+        let receiver = try await AirPlayReceiverResolver.resolve(serviceName: args[1])
+        print("Resolved: \(receiver)")
+        let clock = try AirPlayPTPClock(peerIPv4: receiver.ipv4)
+        clock.start()
+        defer { clock.stop() }
+
+        let captureRate = 48_000.0
+        let ring = RingBuffer(capacitySamples: Int(captureRate) * 2 * 2)
+        let producerRunning = ManagedAtomicFlag()
+        producerRunning.set(true)
+        let halfway = Date().addingTimeInterval(seconds / 2 + 2)
+        let producer = Thread {
+            var phase: Float = 0
+            let chunk = 512
+            var samples = [Float](repeating: 0, count: chunk * 2)
+            let start = DispatchTime.now().uptimeNanoseconds
+            var produced = 0
+            while producerRunning.get() {
+                let frequency: Float = Date() < halfway ? 440 : 660
+                for frame in 0..<chunk {
+                    let value = sin(phase) * 0.3
+                    samples[frame * 2] = value
+                    samples[frame * 2 + 1] = value
+                    phase += 2 * .pi * frequency / Float(captureRate)
+                    if phase > 2 * .pi { phase -= 2 * .pi }
+                }
+                samples.withUnsafeBufferPointer { ring.write($0.baseAddress!, count: $0.count) }
+                produced += chunk
+                let deadline = start + UInt64(Double(produced) / captureRate * 1e9)
+                let now = DispatchTime.now().uptimeNanoseconds
+                if deadline > now { usleep(useconds_t((deadline - now) / 1000)) }
+            }
+        }
+        producer.start()
+
+        let sender = AirPlayRealtimeSender(
+            receiver: receiver, identity: identity, ptpClock: clock,
+            source: ring, inputSampleRate: captureRate
+        )
+        sender.onFailure = { error in print("Sender failed: \(error)") }
+        print("Starting sender...")
+        try await sender.start()
+        print("Streaming for \(seconds) s (audible after ~2 s latency)...")
+        try await Task.sleep(nanoseconds: UInt64(seconds / 2 * 1e9))
+        print("Halfway: switching to 660 Hz and setting volume 0.5.")
+        sender.setVolume(0.5)
+        try await Task.sleep(nanoseconds: UInt64((seconds / 2 + 2) * 1e9))
+        print("Stopping (TEARDOWN)...")
+        await sender.stop()
+        producerRunning.set(false)
+        print("PASS: sender started, streamed, and stopped cleanly.")
+    } catch {
+        print("FAIL: \(error)")
+        exit(1)
+    }
+    exit(0)
+}
+
+final class ManagedAtomicFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set(_ newValue: Bool) { lock.withLock { value = newValue } }
+    func get() -> Bool { lock.withLock { value } }
+}
+
 guard args.count >= 3 else {
     print("Usage:")
     print("  AirPlayPairingSmokeTest verify <ipv6-link-local-address> <interface-name> [port]")

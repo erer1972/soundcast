@@ -55,6 +55,16 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// One AirPlay receiver being fed by one source: its own mirror of
+    /// that source's capture buffer, plus the sender (nil while the
+    /// session is still being resolved/negotiated).
+    private final class AirPlayCast {
+        let mirror: RingBuffer
+        var sender: AirPlayRealtimeSender?
+        var startTask: Task<Void, Never>?
+        init(mirror: RingBuffer) { self.mirror = mirror }
+    }
+
     @Published var activeSources: Set<CastSource> = []
     @Published var selectedDeviceIDsBySource: [CastSource: Set<String>] = [:]
     @Published var perDeviceGainBySource: [CastSource: [String: Float]] = [:]
@@ -67,8 +77,17 @@ final class AppState: ObservableObject {
     @Published var masterVolume: Float = 1.0
     @Published var launchAtLoginEnabled: Bool = LaunchAtLogin.isEnabled
     @Published var lastErrorBySource: [CastSource: String] = [:]
+    /// Per AirPlay device: "Connecting…", "Playing", or an error message.
+    @Published var airplayStatus: [String: String] = [:]
 
     private var runningSessions: [CastSource: RunningSession] = [:]
+    private var airplayCasts: [CastSource: [String: AirPlayCast]] = [:]
+    /// Bonjour instance name per AirPlay device ID, for resolving.
+    private var airplayServiceNames: [String: String] = [:]
+    /// One PTP grandmaster for every AirPlay session (UDP 319/320 can
+    /// only be bound once). Created on first use, stopped when idle.
+    private var ptpClock: AirPlayPTPClock?
+    private let airplayIdentity = AirPlayIdentity.loadOrCreate()
 
     // Design doc §12 Phase 2 step 1: Bonjour discovery feeds `airplayDevices`
     // (already-existing published property, previously always empty) so
@@ -81,6 +100,9 @@ final class AppState: ObservableObject {
     init() {
         airPlayDiscovery.$receivers
             .sink { [weak self] receivers in
+                for receiver in receivers {
+                    self?.airplayServiceNames["airplay:\(receiver.id)"] = receiver.name
+                }
                 self?.airplayDevices = receivers.map { receiver in
                     SoundDevice(
                         id: "airplay:\(receiver.id)",
@@ -124,7 +146,7 @@ final class AppState: ObservableObject {
     /// Devices ticked for one source, in list order.
     func selectedDevices(for source: CastSource) -> [SoundDevice] {
         let selected = selectedDeviceIDsBySource[source] ?? []
-        return localDevices.filter { selected.contains($0.id) }
+        return (localDevices + airplayDevices).filter { selected.contains($0.id) }
     }
 
     /// Every device currently receiving audio from any active source, de-duplicated.
@@ -166,6 +188,13 @@ final class AppState: ObservableObject {
         if selected.contains(device.id) {
             selected.remove(device.id)
         } else {
+            // A receiver plays one sender at a time; a second session from
+            // another source would just kick the first one off.
+            if device.category == .airplay,
+               let other = Self.allSources.first(where: { $0 != source && selectedDeviceIDsBySource[$0]?.contains(device.id) == true }) {
+                lastErrorBySource[source] = "\(device.name) is already used by \"\(other.displayName)\"."
+                return
+            }
             selected.insert(device.id)
         }
         selectedDeviceIDsBySource[source] = selected
@@ -177,12 +206,18 @@ final class AppState: ObservableObject {
     func setGain(for device: SoundDevice, source: CastSource, gain: Float) {
         perDeviceGainBySource[source, default: [:]][device.id] = gain
         runningSessions[source]?.output.setGain(deviceID: device.id, gain: gain)
+        airplayCasts[source]?[device.id]?.sender?.setVolume(gain * masterVolume)
     }
 
     func setMasterVolume(_ volume: Float) {
         masterVolume = volume
         for session in runningSessions.values {
             session.output.masterGain = volume
+        }
+        for (source, casts) in airplayCasts {
+            for (deviceID, cast) in casts {
+                cast.sender?.setVolume((perDeviceGainBySource[source]?[deviceID] ?? 1.0) * volume)
+            }
         }
     }
 
@@ -255,8 +290,16 @@ final class AppState: ObservableObject {
 
         do {
             try captureEngine.start()
-            try applySelection(on: outputEngine, for: source)
             runningSessions[source] = RunningSession(ringBuffer: buffer, capture: captureEngine, output: outputEngine)
+            do {
+                try applySelection(on: outputEngine, for: source)
+            } catch {
+                for deviceID in Array(airplayCasts[source]?.keys ?? [:].keys) {
+                    stopAirPlay(deviceID: deviceID, source: source)
+                }
+                runningSessions[source] = nil
+                throw error
+            }
             activeSources.insert(source)
             lastErrorBySource[source] = nil
             return .started
@@ -278,6 +321,9 @@ final class AppState: ObservableObject {
         retryTasks[source]?.cancel()
         retryTasks[source] = nil
         lastErrorBySource[source] = nil
+        for deviceID in Array(airplayCasts[source]?.keys ?? [:].keys) {
+            stopAirPlay(deviceID: deviceID, source: source)
+        }
         runningSessions[source]?.stop()
         runningSessions[source] = nil
         activeSources.remove(source)
@@ -295,6 +341,7 @@ final class AppState: ObservableObject {
 
     private func applySelection(on outputEngine: LocalOutputEngine, for source: CastSource) throws {
         let selected = selectedDeviceIDsBySource[source] ?? []
+        syncAirPlay(for: source, selected: selected)
         let gains = perDeviceGainBySource[source] ?? [:]
         let targets = localDevices
             .filter { selected.contains($0.id) }
@@ -304,5 +351,104 @@ final class AppState: ObservableObject {
             return
         }
         try outputEngine.reconfigure(targets: targets)
+    }
+
+    // MARK: - AirPlay
+
+    /// Starts senders for newly ticked AirPlay devices and stops ones that
+    /// were unticked. Only runs while the source's capture is running.
+    private func syncAirPlay(for source: CastSource, selected: Set<String>) {
+        let wanted = Set(selected.filter { $0.hasPrefix("airplay:") })
+        let current = Set(airplayCasts[source]?.keys ?? [:].keys)
+        for deviceID in current.subtracting(wanted) {
+            stopAirPlay(deviceID: deviceID, source: source)
+        }
+        for deviceID in wanted.subtracting(current) {
+            startAirPlay(deviceID: deviceID, source: source)
+        }
+    }
+
+    private func startAirPlay(deviceID: String, source: CastSource) {
+        guard let session = runningSessions[source] else { return }
+        guard let serviceName = airplayServiceNames[deviceID] else {
+            airplayStatus[deviceID] = "Not found on the network"
+            return
+        }
+        // ~2 s of capture-rate stereo; the sender keeps ~60 ms in it.
+        let mirror = RingBuffer(capacitySamples: Int(session.capture.sampleRate) * 2 * 2)
+        let cast = AirPlayCast(mirror: mirror)
+        airplayCasts[source, default: [:]][deviceID] = cast
+        airplayStatus[deviceID] = "Connecting…"
+        let inputRate = session.capture.sampleRate
+        let volume = (perDeviceGainBySource[source]?[deviceID] ?? 1.0) * masterVolume
+
+        cast.startTask = Task { [weak self] in
+            do {
+                let receiver = try await AirPlayReceiverResolver.resolve(serviceName: serviceName)
+                guard let self, !Task.isCancelled else { return }
+                let clock = try self.sharedPTPClock(firstPeerIPv4: receiver.ipv4)
+                let sender = AirPlayRealtimeSender(
+                    receiver: receiver, identity: self.airplayIdentity, ptpClock: clock,
+                    source: mirror, inputSampleRate: inputRate
+                )
+                sender.setVolume(volume)
+                sender.onFailure = { [weak self] error in
+                    Task { @MainActor in self?.airPlayFailed(deviceID: deviceID, source: source, error: error) }
+                }
+                session.ringBuffer.addMirror(mirror)
+                cast.sender = sender
+                try await sender.start()
+                guard !Task.isCancelled else {
+                    await sender.stop()
+                    return
+                }
+                self.airplayStatus[deviceID] = "Playing"
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.airPlayFailed(deviceID: deviceID, source: source, error: error)
+            }
+        }
+    }
+
+    private func stopAirPlay(deviceID: String, source: CastSource) {
+        guard let cast = airplayCasts[source]?.removeValue(forKey: deviceID) else { return }
+        cast.startTask?.cancel()
+        runningSessions[source]?.ringBuffer.removeMirror(cast.mirror)
+        airplayStatus[deviceID] = nil
+        let startTask = cast.startTask
+        Task { [weak self] in
+            // Let an in-flight start settle before tearing down, so stop
+            // never races establishSession on the same RTSP connection.
+            await startTask?.value
+            await cast.sender?.stop()
+            self?.stopPTPClockIfIdle()
+        }
+    }
+
+    private func airPlayFailed(deviceID: String, source: CastSource, error: Error) {
+        NSLog("[SoundCast][AppState] AirPlay \(deviceID) failed: \(error)")
+        let message: String
+        if case AirPlayRealtimeSender.SenderError.notPaired = error {
+            message = "Not paired with SoundCast yet"
+        } else {
+            message = "Failed: \(error)"
+        }
+        stopAirPlay(deviceID: deviceID, source: source)
+        airplayStatus[deviceID] = message
+    }
+
+    private func sharedPTPClock(firstPeerIPv4: String) throws -> AirPlayPTPClock {
+        if let ptpClock { return ptpClock }
+        let clock = try AirPlayPTPClock(peerIPv4: firstPeerIPv4)
+        clock.removePeer(ipv4: firstPeerIPv4) // senders add/remove their own peer
+        clock.start()
+        ptpClock = clock
+        return clock
+    }
+
+    private func stopPTPClockIfIdle() {
+        guard airplayCasts.values.allSatisfy({ $0.isEmpty }), let clock = ptpClock, clock.peerCount == 0 else { return }
+        clock.stop()
+        ptpClock = nil
     }
 }

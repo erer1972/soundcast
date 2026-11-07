@@ -8,7 +8,12 @@ import Foundation
 public protocol AudioCaptureSource: AnyObject {
     func start() throws
     func stop()
+    /// Sample rate of the interleaved stereo Float32 written to the ring
+    /// buffer. Valid after `start()`; AirPlay senders resample from it.
+    var sampleRate: Double { get }
 }
 
 extension ProcessTapCapture: AudioCaptureSource {}
-extension VirtualDeviceCapture: AudioCaptureSource {}
+extension VirtualDeviceCapture: AudioCaptureSource {
+    public var sampleRate: Double { Double(Layout.sampleRateHz) }
+}

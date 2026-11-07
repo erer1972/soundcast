@@ -18,7 +18,10 @@ public final class AirPlayPTPClock: @unchecked Sendable {
     public let peerID = UUID().uuidString
     public let clockIdentity: UInt64
 
-    private let peerAddress: sockaddr_in
+    /// Receivers this clock is grandmaster for. One clock per process,
+    /// since UDP 319/320 can only be bound once; each AirPlay session
+    /// adds its receiver and removes it on teardown.
+    private var peers: [sockaddr_in] = []
     private let eventSocket: Int32
     private let generalSocket: Int32
     private let queue = DispatchQueue(label: "SoundCast.AirPlayPTPClock")
@@ -52,7 +55,7 @@ public final class AirPlayPTPClock: @unchecked Sendable {
         peerSocketAddress.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         peerSocketAddress.sin_family = sa_family_t(AF_INET)
         peerSocketAddress.sin_addr = peer
-        peerAddress = peerSocketAddress
+        peers = [peerSocketAddress]
         guard let localAddress = Self.routeSelectedIPv4(to: peerSocketAddress) else {
             throw ClockError.invalidPeerAddress(peerIPv4)
         }
@@ -72,6 +75,39 @@ public final class AirPlayPTPClock: @unchecked Sendable {
         }
         self.eventSocket = eventSocket
     }
+
+    /// Adds a receiver (IPv4 literal) to the set this clock serves.
+    public func addPeer(ipv4: String) throws {
+        let address = try Self.socketAddress(ipv4)
+        queue.sync {
+            guard !peers.contains(where: { $0.sin_addr.s_addr == address.sin_addr.s_addr }) else { return }
+            peers.append(address)
+            if running {
+                sendAnnounce(to: address)
+                sendSignaling(to: address)
+            }
+        }
+    }
+
+    public func removePeer(ipv4: String) {
+        guard let address = try? Self.socketAddress(ipv4) else { return }
+        queue.sync { peers.removeAll { $0.sin_addr.s_addr == address.sin_addr.s_addr } }
+    }
+
+    public var peerCount: Int { queue.sync { peers.count } }
+
+    private static func socketAddress(_ ipv4: String) throws -> sockaddr_in {
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        guard ipv4.withCString({ inet_pton(AF_INET, $0, &address.sin_addr) }) == 1 else {
+            throw ClockError.invalidPeerAddress(ipv4)
+        }
+        return address
+    }
+
+    /// Current time on this clock, in nanoseconds (what `0xD7` anchors use).
+    public static func now() -> UInt64 { nowNanoseconds() }
 
     public var timingPeerInfo: [String: Any] {
         [
@@ -212,6 +248,11 @@ public final class AirPlayPTPClock: @unchecked Sendable {
     }
 
     private func sendAnnounce() {
+        for peer in peers { sendAnnounce(to: peer) }
+        announceSequence &+= 1
+    }
+
+    private func sendAnnounce(to peer: sockaddr_in) {
         var packet = header(type: 0x0B, length: 76, flags: 0x0408,
                             sequence: announceSequence, control: 0, logInterval: 0)
         packet[47] = 128
@@ -224,11 +265,15 @@ public final class AirPlayPTPClock: @unchecked Sendable {
         writeUInt16(0x0008, to: &packet, at: 64)
         writeUInt16(8, to: &packet, at: 66)
         writeUInt64(clockIdentity, to: &packet, at: 68)
-        send(packet, socket: generalSocket, to: peerAddress, port: 320)
-        announceSequence &+= 1
+        send(packet, socket: generalSocket, to: peer, port: 320)
     }
 
     private func sendSignaling() {
+        for peer in peers { sendSignaling(to: peer) }
+        signalingSequence &+= 1
+    }
+
+    private func sendSignaling(to peer: sockaddr_in) {
         var packet = [UInt8](repeating: 0, count: 106)
         writeHeader(type: 0x0C, length: 106, flags: 0x0408,
                     sequence: signalingSequence, control: 0x05, logInterval: -128,
@@ -241,8 +286,7 @@ public final class AirPlayPTPClock: @unchecked Sendable {
         writeUInt16(32, to: &packet, at: 72)
         packet[74...79] = [0x00, 0x0D, 0x93, 0x00, 0x00, 0x05]
         packet[80...83] = [0x00, 0x00, 0x03, 0x01]
-        send(packet, socket: generalSocket, to: peerAddress, port: 320)
-        signalingSequence &+= 1
+        send(packet, socket: generalSocket, to: peer, port: 320)
     }
 
     private func sendSync() {
@@ -251,7 +295,7 @@ public final class AirPlayPTPClock: @unchecked Sendable {
                           sequence: sequence, control: 0, logInterval: -3)
         let zeroTimestamp = [UInt8](repeating: 0, count: 10)
         sync.replaceSubrange(34..<44, with: zeroTimestamp)
-        send(sync, socket: eventSocket, to: peerAddress, port: 319)
+        for peer in peers { send(sync, socket: eventSocket, to: peer, port: 319) }
 
         var followUp = header(type: 8, length: 96, flags: 0x0408,
                               sequence: sequence, control: 0, logInterval: -3)
@@ -263,7 +307,7 @@ public final class AirPlayPTPClock: @unchecked Sendable {
         writeUInt16(16, to: &followUp, at: 78)
         followUp[80...85] = [0x00, 0x0D, 0x93, 0x00, 0x00, 0x04]
         writeUInt64(clockIdentity, to: &followUp, at: 86)
-        send(followUp, socket: generalSocket, to: peerAddress, port: 320)
+        for peer in peers { send(followUp, socket: generalSocket, to: peer, port: 320) }
         syncSequence &+= 1
     }
 
@@ -430,6 +474,27 @@ public final class AirPlayPTPClock: @unchecked Sendable {
         let end = output.firstIndex(of: 0) ?? output.endIndex
         let bytes = output[..<end].map { UInt8(bitPattern: $0) }
         return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// Name of the local interface that owns `ipv4Address` (e.g. "en0").
+    static func interfaceName(forLocalIPv4 ipv4Address: String) -> String? {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0, let first = interfaces else { return nil }
+        defer { freeifaddrs(first) }
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+        while let interface = current {
+            let item = interface.pointee
+            if let address = item.ifa_addr, address.pointee.sa_family == sa_family_t(AF_INET) {
+                var inAddress = UnsafeRawPointer(address).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
+                var output = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &inAddress, &output, socklen_t(output.count)) != nil,
+                   String(cString: output) == ipv4Address {
+                    return String(cString: item.ifa_name)
+                }
+            }
+            current = item.ifa_next
+        }
+        return nil
     }
 
     static func hardwareAddress(for ipv4Address: String) -> [UInt8]? {

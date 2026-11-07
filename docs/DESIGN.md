@@ -787,11 +787,38 @@ isn't repeated:
     requests, so "0 grants" was never a gap. `kaan` yields to our
     clock (its priority1 is 248, ours 128) and then only sends
     Delay_Req.
-  - Not yet done: integrating the realtime path into the app's casting
-    session (live capture → 44.1 kHz → ALAC → RTP), retransmit
-    requests, multi-receiver timing, and teardown. RTP is currently
-    sent to a link-local address supplied on the command line. The
-    app will need to take it from Bonjour resolution.
+  - **App integration (2026-11-07, built; app UI not yet tested by
+    hand).** `AirPlayRealtimeSender` is the production sender. Each
+    ticked AirPlay room gets a mirror of its source's capture
+    `RingBuffer` (`addMirror`). The sender is paced by the wall clock:
+    it sends what wall time says is due, zero-fills on capture underrun
+    so the receiver's timeline never stalls, and drops or duplicates
+    single frames to hold a 20–120 ms cushion against capture-clock
+    drift. RTP time is anchored once, and `0xD7` sync is restated every
+    second. Audio is resampled from the capture rate (the tap reports
+    its aggregate's nominal rate) to 44.1 kHz in the ALAC converter.
+    Other session handling:
+    - `POST /feedback` keepalive every 25 s.
+    - `TEARDOWN` with an empty bplist on stop.
+    - Volume maps gain 0…1 to −30…0 dB (0 = −144), like OwnTones.
+    - RTSP calls are serialized.
+
+    `AirPlayReceiverResolver` resolves the Bonjour name via DNS-SD and
+    scopes the link-local address to the interface the IPv4 route
+    uses, because the Mac Pro has en0 and en2 on the same LAN. One
+    shared `AirPlayPTPClock` serves every receiver (`addPeer` /
+    `removePeer`). The smoke test `cast <name> [s]` drives this exact
+    class with a 48 kHz producer. It was heard on `kaan`, including a
+    mid-stream frequency and volume change, and `TEARDOWN` returned
+    200. Unpaired receivers show "Not paired with SoundCast yet";
+    pair-setup UI is not built.
+  - Still open:
+    - retransmit requests (we never resend lost RTP);
+    - multi-receiver sync quality (shared clock, but untested with two
+      rooms);
+    - long-run drift behaviour;
+    - pair-setup UI;
+    - reconnect after a receiver restarts.
 
   Earlier history: buffered `type=103` path (superseded). The
   original AAC-LC attempt was ACKed and then reset by

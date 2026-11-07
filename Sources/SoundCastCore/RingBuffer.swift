@@ -32,15 +32,50 @@ public final class RingBuffer {
         storage = [Float](repeating: 0, count: capacitySamples)
     }
 
+    /// Extra consumers (one per AirPlay sender) that receive a copy of
+    /// every write, so one capture callback can feed several consumers
+    /// that each read at their own pace (design doc §6).
+    private var mirrors: [RingBuffer] = []
+
+    public func addMirror(_ mirror: RingBuffer) {
+        os_unfair_lock_lock(&lock)
+        mirrors.append(mirror)
+        os_unfair_lock_unlock(&lock)
+    }
+
+    public func removeMirror(_ mirror: RingBuffer) {
+        os_unfair_lock_lock(&lock)
+        mirrors.removeAll { $0 === mirror }
+        os_unfair_lock_unlock(&lock)
+    }
+
     /// Producer side — call only from the capture callback.
     public func write(_ samples: UnsafePointer<Float>, count sampleCount: Int) {
         os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
         for i in 0..<sampleCount {
             storage[writeIndex] = samples[i]
             writeIndex = (writeIndex + 1) % capacity
         }
+        if count + sampleCount > capacity {
+            // Overflow: the oldest samples were overwritten, so move the
+            // read position up to the oldest surviving sample instead of
+            // leaving it pointing into freshly written data.
+            readIndex = writeIndex
+        }
         count = min(capacity, count + sampleCount)
+        let mirrors = self.mirrors
+        os_unfair_lock_unlock(&lock)
+        for mirror in mirrors {
+            mirror.write(samples, count: sampleCount)
+        }
+    }
+
+    /// Discards everything buffered (consumer side).
+    public func clear() {
+        os_unfair_lock_lock(&lock)
+        readIndex = writeIndex
+        count = 0
+        os_unfair_lock_unlock(&lock)
     }
 
     /// Consumer side. Writes `sampleCount` samples into `out`,

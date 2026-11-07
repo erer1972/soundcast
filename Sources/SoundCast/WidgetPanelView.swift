@@ -183,6 +183,12 @@ struct WidgetPanelView: View {
                                             .background(.white.opacity(0.12), in: Capsule())
                                             .foregroundStyle(.secondary)
                                         Spacer()
+                                        if let status = state.airplayStatus[device.id] {
+                                            Text(status)
+                                                .font(.system(size: 10.5))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
                                     }
                                     Slider(
                                         value: Binding(
