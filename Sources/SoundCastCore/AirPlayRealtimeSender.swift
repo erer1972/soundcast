@@ -314,6 +314,12 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
         var lastCorrectionUptime = anchorUptime
         var buffer = [Float](repeating: 0, count: (chunkFrames + 1) * 2)
         var sendErrors = 0
+        // Health counters, logged every 30 s: frames dropped/duplicated by
+        // drift correction, reads that came up short (audible gaps), and
+        // the cushion's range over the window.
+        var droppedFrames = 0, duplicatedFrames = 0, underruns = 0
+        var minFill = Int.max, maxFill = 0
+        var lastStatsUptime = anchorUptime
 
         while isRunning {
             let now = DispatchTime.now().uptimeNanoseconds
@@ -321,16 +327,21 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
             while inputFed + chunkFrames <= inputDue {
                 // Single-frame drift correction, at most every 50 ms.
                 let fill = source.framesAvailable / 2
+                minFill = min(minFill, fill)
+                maxFill = max(maxFill, fill)
                 var readFrames = chunkFrames
                 if now - lastCorrectionUptime > 50_000_000 {
                     if fill > highWater {
                         readFrames = chunkFrames + 1
                         lastCorrectionUptime = now
+                        droppedFrames += 1
                     } else if fill > 0 && fill < lowWater {
                         readFrames = chunkFrames - 1
                         lastCorrectionUptime = now
+                        duplicatedFrames += 1
                     }
                 }
+                if fill > 0 && fill < readFrames { underruns += 1 }
                 buffer.withUnsafeMutableBufferPointer {
                     source.read(into: $0.baseAddress!, count: readFrames * 2)
                 }
@@ -357,6 +368,15 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
             if now - lastSyncUptime >= 1_000_000_000 {
                 try? controlSocket.send(syncPacket(first: false), to: receiver.scopedIPv6, port: remoteControlPort)
                 lastSyncUptime = now
+            }
+            if now - lastStatsUptime >= 30_000_000_000 {
+                let resends = stream.resendStats
+                NSLog("[SoundCast][AirPlay] \(receiver.serviceName): %.0f s, cushion %d–%d frames, drift-corrected −%d/+%d frames, short reads %d, resent %d (%d unavailable)",
+                      Double(now - anchorUptime) / 1e9, minFill == Int.max ? 0 : minFill, maxFill,
+                      droppedFrames, duplicatedFrames, underruns, resends.resent, resends.unavailable)
+                droppedFrames = 0; duplicatedFrames = 0; underruns = 0
+                minFill = Int.max; maxFill = 0
+                lastStatsUptime = now
             }
             usleep(4_000)
         }
