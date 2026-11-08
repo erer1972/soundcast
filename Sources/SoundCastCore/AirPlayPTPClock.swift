@@ -22,6 +22,10 @@ public final class AirPlayPTPClock: @unchecked Sendable {
     /// since UDP 319/320 can only be bound once; each AirPlay session
     /// adds its receiver and removes it on teardown.
     private var peers: [sockaddr_in] = []
+    /// Sessions using each peer (keyed by s_addr). A reconnect can add
+    /// the same receiver before the old session's teardown removes it,
+    /// so removal only takes effect when the last user is gone.
+    private var peerUsers: [in_addr_t: Int] = [:]
     private let eventSocket: Int32
     private let generalSocket: Int32
     private let queue = DispatchQueue(label: "SoundCast.AirPlayPTPClock")
@@ -80,6 +84,7 @@ public final class AirPlayPTPClock: @unchecked Sendable {
     public func addPeer(ipv4: String) throws {
         let address = try Self.socketAddress(ipv4)
         queue.sync {
+            peerUsers[address.sin_addr.s_addr, default: 0] += 1
             guard !peers.contains(where: { $0.sin_addr.s_addr == address.sin_addr.s_addr }) else { return }
             peers.append(address)
             if running {
@@ -91,7 +96,12 @@ public final class AirPlayPTPClock: @unchecked Sendable {
 
     public func removePeer(ipv4: String) {
         guard let address = try? Self.socketAddress(ipv4) else { return }
-        queue.sync { peers.removeAll { $0.sin_addr.s_addr == address.sin_addr.s_addr } }
+        queue.sync {
+            let key = address.sin_addr.s_addr
+            let remaining = max(0, (peerUsers[key] ?? 0) - 1)
+            peerUsers[key] = remaining == 0 ? nil : remaining
+            if remaining == 0 { peers.removeAll { $0.sin_addr.s_addr == key } }
+        }
     }
 
     public var peerCount: Int { queue.sync { peers.count } }

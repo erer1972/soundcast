@@ -92,6 +92,8 @@ final class AppState: ObservableObject {
     /// The one pairing in progress (device ID and step), if any.
     @Published var pairing: (deviceID: String, step: PairingStep)?
     private var pairingConnection: AirPlayRTSPConnection?
+    private var reconnectAttempts: [String: Int] = [:]
+    private var reconnectTasks: [String: Task<Void, Never>] = [:]
 
     private var runningSessions: [CastSource: RunningSession] = [:]
     private var airplayCasts: [CastSource: [String: AirPlayCast]] = [:]
@@ -439,6 +441,7 @@ final class AppState: ObservableObject {
                     return
                 }
                 self.airplayStatus[deviceID] = "Playing"
+                self.reconnectAttempts[deviceID] = nil
             } catch {
                 guard let self, !Task.isCancelled else { return }
                 self.airPlayFailed(deviceID: deviceID, source: source, error: error)
@@ -447,6 +450,7 @@ final class AppState: ObservableObject {
     }
 
     private func stopAirPlay(deviceID: String, source: CastSource) {
+        reconnectTasks.removeValue(forKey: deviceID)?.cancel()
         guard let cast = airplayCasts[source]?.removeValue(forKey: deviceID) else { return }
         cast.startTask?.cancel()
         runningSessions[source]?.ringBuffer.removeMirror(cast.mirror)
@@ -463,15 +467,29 @@ final class AppState: ObservableObject {
 
     private func airPlayFailed(deviceID: String, source: CastSource, error: Error) {
         NSLog("[SoundCast][AppState] AirPlay \(deviceID) failed: \(error)")
-        let message: String
-        if case AirPlayRealtimeSender.SenderError.notPaired = error {
-            message = "Not paired with SoundCast yet"
-            unpairedAirPlayDevices.insert(deviceID)
-        } else {
-            message = "Failed: \(error)"
-        }
         stopAirPlay(deviceID: deviceID, source: source)
-        airplayStatus[deviceID] = message
+        if case AirPlayRealtimeSender.SenderError.notPaired = error {
+            airplayStatus[deviceID] = "Not paired with SoundCast yet"
+            unpairedAirPlayDevices.insert(deviceID)
+            return
+        }
+        // Anything else (receiver restarted, slept, ended the session,
+        // network blip, not found yet): keep retrying while the room is
+        // still ticked under a running source, backing off 2 → 30 s.
+        let attempt = (reconnectAttempts[deviceID] ?? 0) + 1
+        reconnectAttempts[deviceID] = attempt
+        let delay = min(30.0, pow(2.0, Double(attempt)))
+        airplayStatus[deviceID] = "Reconnecting…"
+        NSLog("[SoundCast][AppState] AirPlay \(deviceID): reconnect attempt \(attempt) in \(Int(delay)) s")
+        reconnectTasks[deviceID] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1e9))
+            guard let self, !Task.isCancelled else { return }
+            self.reconnectTasks[deviceID] = nil
+            guard self.runningSessions[source] != nil,
+                  self.selectedDeviceIDsBySource[source]?.contains(deviceID) == true,
+                  self.airplayCasts[source]?[deviceID] == nil else { return }
+            self.startAirPlay(deviceID: deviceID, source: source)
+        }
     }
 
     // MARK: - AirPlay pairing

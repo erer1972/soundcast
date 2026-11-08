@@ -18,10 +18,12 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
     public enum SenderError: Error, CustomStringConvertible {
         case notPaired
         case stopped
+        case sessionLost(String)
 
         public var description: String {
             switch self {
             case .notPaired: return "this receiver isn't paired with SoundCast yet"
+            case .sessionLost(let reason): return "session lost (\(reason))"
             case .stopped: return "stopped"
             }
         }
@@ -90,6 +92,24 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
             throw error
         }
         stateLock.withLock { running = true }
+        // Session-loss detection: the RTSP connection failing or being
+        // closed, or the receiver closing the event connection (expected
+        // when it ends the session itself, e.g. from its remote). PTP
+        // Delay_Req can't be used: kaan only sends them during setup.
+        connection?.onTermination { [weak self] reason in
+            self?.fail(SenderError.sessionLost(reason))
+        }
+        eventConnection?.onTermination { [weak self] reason in
+            self?.fail(SenderError.sessionLost(reason))
+        }
+        eventConnection?.watchForPeerClose()
+        if let raw = ProcessInfo.processInfo.environment["SOUNDCAST_DEBUG_DROP_SESSION_AFTER"],
+           let seconds = Double(raw), seconds > 0 {
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1e9))
+                self?.fail(SenderError.sessionLost("debug: simulated drop after \(raw) s"))
+            }
+        }
         let thread = Thread { [weak self] in self?.streamLoop() }
         thread.name = "SoundCast.AirPlay.\(receiver.serviceName)"
         thread.qualityOfService = .userInteractive
@@ -97,7 +117,9 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
         thread.start()
         keepAliveTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 25_000_000_000)
+                // 5 s (OwnTones uses 25 s) so a receiver that vanished
+                // without closing anything is noticed quickly.
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard let self, !Task.isCancelled else { return }
                 do {
                     try await self.rtsp.run { try await self.sendFeedback() }

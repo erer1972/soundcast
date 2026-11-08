@@ -67,6 +67,41 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
     private var receiveBuffer = Data()
     private var rawReceiveBuffer = Data()
     private var encryption: EncryptionState?
+    private let closeLock = NSLock()
+    private var closedByUs = false
+    private var terminationHandler: (@Sendable (String) -> Void)?
+
+    /// Called once if the connection dies after it was established
+    /// (failed, or closed by the peer) — not when `close()` is called.
+    public func onTermination(_ handler: @escaping @Sendable (String) -> Void) {
+        closeLock.withLock { terminationHandler = handler }
+    }
+
+    private func reportTermination(_ reason: String) {
+        let handler: (@Sendable (String) -> Void)? = closeLock.withLock {
+            guard !closedByUs else { return nil }
+            defer { terminationHandler = nil }
+            return terminationHandler
+        }
+        handler?(reason)
+    }
+
+    /// For connections nothing else reads from (the event connection):
+    /// drains and discards incoming bytes, and reports termination when
+    /// the peer closes it. A receiver ending the session (e.g. stopped
+    /// from its remote) is expected to close this.
+    public func watchForPeerClose() {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] _, _, isComplete, error in
+            guard let self else { return }
+            if let error {
+                self.reportTermination("event connection error: \(error)")
+            } else if isComplete {
+                self.reportTermination("receiver closed the event connection")
+            } else {
+                self.watchForPeerClose()
+            }
+        }
+    }
 
     public init(host: NWEndpoint.Host, port: NWEndpoint.Port) {
         connection = NWConnection(host: host, port: port, using: .tcp)
@@ -83,8 +118,15 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
         }
         let resumeGuard = ResumeGuard()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.stateUpdateHandler = { state in
-                guard !resumeGuard.didResume else { return }
+            connection.stateUpdateHandler = { [weak self] state in
+                guard !resumeGuard.didResume else {
+                    switch state {
+                    case .failed(let error): self?.reportTermination("connection failed: \(error)")
+                    case .cancelled: self?.reportTermination("connection cancelled")
+                    default: break
+                    }
+                    return
+                }
                 switch state {
                 case .ready:
                     resumeGuard.didResume = true
@@ -104,6 +146,7 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
     }
 
     public func close() {
+        closeLock.withLock { closedByUs = true }
         connection.cancel()
     }
 
