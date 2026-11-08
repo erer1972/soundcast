@@ -42,6 +42,10 @@ public enum SonosUPnPClient {
         _ = try await performAction("Stop", receiver: receiver, arguments: [("InstanceID", "0")])
     }
 
+    public static func pause(_ receiver: SonosReceiver) async throws {
+        _ = try await performAction("Pause", receiver: receiver, arguments: [("InstanceID", "0")])
+    }
+
         public static func liveWAVMetadata(uri: URL, sampleRate: UInt32, channels: UInt16 = 2, bitsPerSample: UInt16 = 16) -> String {
                 let protocolInfo = "http-get:*:audio/wav:DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=0d500000000000000000000000000000"
                 return """

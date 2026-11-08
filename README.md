@@ -129,6 +129,8 @@ SoundCast can browse and connect to receivers on your network.
 These commands use the built `AirPlayDiscoverySmokeTest` executable:
 
 ```sh
+./dist/AirPlayDiscoverySmokeTest --sonos-invalid-rate
+./dist/AirPlayDiscoverySmokeTest --sonos-server-start-probe
 ./dist/AirPlayDiscoverySmokeTest --sonos 5
 ./dist/AirPlayDiscoverySmokeTest --sonos-wav 2 10
 ./dist/AirPlayDiscoverySmokeTest --sonos-tone "SYMFONISK Table lamp" 25
@@ -137,13 +139,16 @@ These commands use the built `AirPlayDiscoverySmokeTest` executable:
 ./dist/AirPlayDiscoverySmokeTest --sonos-reconnect-silent "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-stop-probe "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-switch-probe "SYMFONISK Table lamp" 25
+./dist/AirPlayDiscoverySmokeTest --sonos-external-stop-probe "SYMFONISK Table lamp" 25
+./dist/AirPlayDiscoverySmokeTest --sonos-external-pause-probe "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --dual-cast "kaan" "SYMFONISK Table lamp" 120 2.5
 ```
 
-The first two commands only discover/query the speaker or serve silence;
-the others change its playback. The silent probes play silence and interrupt
-or change the selected source. Replace the names with your discovered receiver
-names. For `--sonos-virtual` and `--dual-cast`, route audio to the main
+The first two commands test invalid sample rates and listener startup locally.
+The next two only discover/query the speaker or serve silence; the others
+change its playback. The silent probes play silence and interrupt or change the
+selected source. Replace the names with your discovered receiver names. For
+`--sonos-virtual` and `--dual-cast`, route audio to the main
 SoundCast virtual output while the test runs. The optional final dual-cast
 argument delays Sonos by that many seconds. A process-tap capture mode is also
 available as `--sonos-live`, but was silent in the most recent test with the
@@ -152,10 +157,13 @@ virtual device selected as the Mac's default output.
 The WAV endpoint uses a large fixed length for a live stream. A roughly
 three-minute virtual-device music test completed. On a forced connection drop,
 the SYMFONISK resumed after a SoundCast retry; explicit SoundCast stop and a
-source change were also tested. A stop from another controller may be
-indistinguishable from an interruption and trigger a retry. The mixed AirPlay
-and Sonos delay is manually calibrated, not clock-synchronized. Longer
-playback, other Sonos models, and range requests remain unverified.
+source change were also tested. External UPnP Stop and Pause remained stopped
+or paused in silent tests on this receiver. Recovery is a heuristic: it only
+attempts a retry when the receiver reconnects within five seconds after an
+established stream disconnects. Other receiver behavior and longer outages
+may not recover automatically. The mixed AirPlay and Sonos delay is manually
+calibrated, not clock-synchronized. Longer playback, other Sonos models, and
+range requests remain unverified.
 
 ## Using it
 

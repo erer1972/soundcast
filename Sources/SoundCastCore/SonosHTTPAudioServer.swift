@@ -30,6 +30,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
     private var listenerSocket: Int32 = -1
     private var running = false
     private var clients: Set<Int32> = []
+    private var interruptedAt: TimeInterval?
 
     public init(source: RingBuffer, sampleRate: Double, delaySeconds: Double = 0, onStreamInterrupted: (@Sendable () -> Void)? = nil) {
         self.source = source
@@ -42,15 +43,18 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
     /// returns a URL the Sonos can use as its AVTransport current URI.
     public func start(peerIPv4: String) throws -> URL {
         guard beginStart() else { throw ServerError.alreadyRunning }
-        guard sampleRate.isFinite, (8_000...192_000).contains(sampleRate) else {
-            stop()
-            throw ServerError.invalidSampleRate(sampleRate)
-        }
+        var started = false
+        defer { if !started { stop() } }
+        try Self.validateSampleRate(sampleRate)
 
         guard let localAddress = Self.routeSelectedLocalAddress(to: peerIPv4) else {
-            stop()
             throw ServerError.invalidPeerAddress(peerIPv4)
         }
+        var peerAddress = in_addr()
+        guard peerIPv4.withCString({ inet_pton(AF_INET, $0, &peerAddress) }) == 1 else {
+            throw ServerError.invalidPeerAddress(peerIPv4)
+        }
+        let receiverAddress = peerAddress.s_addr
 
         let socket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
         guard socket >= 0 else { throw ServerError.socketFailure("socket", errno) }
@@ -96,7 +100,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         let port = UInt16(bigEndian: bound.sin_port)
         setListener(socket)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.acceptLoop(socket)
+            self?.acceptLoop(socket, receiverAddress: receiverAddress)
         }
 
         guard let url = URL(string: "http://\(localAddress):\(port)/stream.wav") else {
@@ -104,7 +108,14 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             throw ServerError.invalidPeerAddress(localAddress)
         }
         NSLog("[SoundCast][SonosHTTPAudioServer] listening on port \(port)")
+        started = true
         return url
+    }
+
+    static func validateSampleRate(_ sampleRate: Double) throws {
+        guard sampleRate.isFinite, (8_000...192_000).contains(sampleRate) else {
+            throw ServerError.invalidSampleRate(sampleRate)
+        }
     }
 
     public func stop() {
@@ -118,6 +129,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         listenerSocket = -1
         let activeClients = Array(clients)
         clients.removeAll()
+        interruptedAt = nil
         lock.unlock()
 
         if listener >= 0 {
@@ -134,7 +146,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         return clients.count
     }
 
-    private func acceptLoop(_ listener: Int32) {
+    private func acceptLoop(_ listener: Int32, receiverAddress: in_addr_t) {
         NSLog("[SoundCast][SonosHTTPAudioServer] accept loop started")
         while isRunning {
             var descriptor = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
@@ -168,11 +180,12 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             lock.unlock()
             guard shouldServe else { Darwin.close(client); return }
             NSLog("[SoundCast][SonosHTTPAudioServer] accepted client")
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.serve(client) }
+            let isReceiver = address.sin_addr.s_addr == receiverAddress
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.serve(client, isReceiver: isReceiver) }
         }
     }
 
-    private func serve(_ client: Int32) {
+    private func serve(_ client: Int32, isReceiver: Bool) {
         defer {
             lock.lock()
             clients.remove(client)
@@ -195,6 +208,8 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             return
         }
 
+        if isReceiver { noteReceiverReconnect() }
+
         guard sendAll(client, Data(response.utf8)), sendAll(client, Self.waveHeader(sampleRate: UInt32(sampleRate.rounded()))) else { return }
         var peak: Float = 0
         var chunks = 0
@@ -215,7 +230,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             let data = Self.pcm16(samples)
             let count = min(remaining, data.count)
             guard sendAll(client, Data(data.prefix(count))) else {
-                if chunks >= 150 && isRunning { onStreamInterrupted?() }
+                if chunks >= 150 && isReceiver { noteReceiverInterruption() }
                 return
             }
             remaining -= count
@@ -224,6 +239,20 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             let delay = nextDeadline - ProcessInfo.processInfo.systemUptime
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         }
+    }
+
+    private func noteReceiverInterruption() {
+        lock.lock()
+        if running { interruptedAt = ProcessInfo.processInfo.systemUptime }
+        lock.unlock()
+    }
+
+    private func noteReceiverReconnect() {
+        lock.lock()
+        let shouldRecover = running && interruptedAt.map { ProcessInfo.processInfo.systemUptime - $0 <= 5 } == true
+        interruptedAt = nil
+        lock.unlock()
+        if shouldRecover { onStreamInterrupted?() }
     }
 
     private func readRequest(_ client: Int32) -> String? {

@@ -5,12 +5,14 @@ enum SonosReconnectError: Error, CustomStringConvertible {
     case noClients
     case notPlaying(String, String)
     case notStopped(String, String)
+    case notPaused(String, String)
 
     var description: String {
         switch self {
         case .noClients: return "no media connection was available to interrupt"
         case .notPlaying(let state, let status): return "transport did not resume: \(state)/\(status)"
         case .notStopped(let state, let status): return "transport did not stay stopped: \(state)/\(status)"
+        case .notPaused(let state, let status): return "transport did not stay paused: \(state)/\(status)"
         }
     }
 }
@@ -55,6 +57,60 @@ final class SonosTestTone: @unchecked Sendable {
 CPUFeatureGuard.logAndGuard(context: "AirPlayDiscoverySmokeTest launch")
 
 var args = Array(CommandLine.arguments.dropFirst())
+if args.first == "--sonos-server-start-probe" {
+    let server = SonosHTTPAudioServer(source: RingBuffer(capacitySamples: 96_000), sampleRate: 48_000)
+    do {
+        for _ in 0..<2 {
+            do {
+                _ = try server.start(peerIPv4: "invalid")
+                server.stop()
+                print("FAIL: accepted an invalid receiver address.")
+                exit(1)
+            } catch SonosHTTPAudioServer.ServerError.invalidPeerAddress {
+            }
+        }
+        let url = try server.start(peerIPv4: "127.0.0.1")
+        defer { server.stop() }
+        var request = URLRequest(url: url)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 5
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              http.value(forHTTPHeaderField: "Content-Type") == "audio/wav",
+              http.value(forHTTPHeaderField: "Content-Length") == "2147483644" else {
+            print("FAIL: listener returned an unexpected HTTP response.")
+            exit(1)
+        }
+        print("PASS: listener recovered from failed starts and served a WAV response.")
+    } catch {
+        print("FAIL: listener startup probe: \(error)")
+        exit(1)
+    }
+    exit(0)
+}
+if args.first == "--sonos-invalid-rate" {
+    let receiver = SonosReceiver(
+        id: "test", name: "test", model: nil,
+        descriptionURL: URL(string: "http://127.0.0.1/")!, avTransportControlURL: nil
+    )
+    for rate in [Double.nan, Double.infinity, -1, 0, 7_999, 192_001] {
+        let streamer = SonosAudioStreamer(receiver: receiver, source: RingBuffer(capacitySamples: 2), sampleRate: rate)
+        for _ in 0..<2 {
+            do {
+                try await streamer.start()
+                await streamer.stop()
+                print("FAIL: accepted invalid sample rate \(rate)")
+                exit(1)
+            } catch SonosHTTPAudioServer.ServerError.invalidSampleRate {
+            } catch {
+                print("FAIL: unexpected error for sample rate \(rate): \(error)")
+                exit(1)
+            }
+        }
+    }
+    print("PASS: invalid sample rates rejected without starting or retaining a session.")
+    exit(0)
+}
 if args.first == "--capture-level" || args.first == "--capture-level-virtual" {
     let duration = args.dropFirst().first.flatMap(Int.init) ?? 15
     let buffer = RingBuffer(capacitySamples: 48_000 * 2 * 4)
@@ -84,7 +140,9 @@ if args.first == "--capture-level" || args.first == "--capture-level-virtual" {
 let sonosManualRetryMode = args.first == "--sonos-retry-probe"
 let sonosStopProbe = args.first == "--sonos-stop-probe"
 let sonosSwitchProbe = args.first == "--sonos-switch-probe"
-let sonosSilentReconnectMode = args.first == "--sonos-reconnect-silent" || sonosStopProbe || sonosSwitchProbe
+let sonosExternalStopProbe = args.first == "--sonos-external-stop-probe"
+let sonosExternalPauseProbe = args.first == "--sonos-external-pause-probe"
+let sonosSilentReconnectMode = args.first == "--sonos-reconnect-silent" || sonosStopProbe || sonosSwitchProbe || sonosExternalStopProbe || sonosExternalPauseProbe
 let sonosReconnectMode = args.first == "--sonos-reconnect" || sonosManualRetryMode || sonosSilentReconnectMode
 let sonosToneMode = args.first == "--sonos-tone" || sonosReconnectMode
 let dualCastMode = args.first == "--dual-cast"
@@ -188,6 +246,31 @@ if sonosMode {
                 print("Sonos stream started for \(durationSeconds)s. \(sonosSilentReconnectMode ? "Playing silence." : sonosToneMode ? "Playing test tone." : "Now open the audio source on this Mac.")")
                 if sonosReconnectMode {
                     try await Task.sleep(nanoseconds: 10_000_000_000)
+                    if sonosExternalStopProbe || sonosExternalPauseProbe {
+                        if sonosExternalPauseProbe {
+                            try await SonosUPnPClient.pause(receiver)
+                            print("Sent an external Pause action.")
+                        } else {
+                            try await SonosUPnPClient.stop(receiver)
+                            print("Sent an external Stop action.")
+                        }
+                        try await Task.sleep(nanoseconds: 6_000_000_000)
+                        let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                        print("Transport after external action: \(info.currentTransportState)/\(info.currentTransportStatus)")
+                        if sonosExternalPauseProbe {
+                            guard info.currentTransportState == "PAUSED_PLAYBACK" else {
+                                throw SonosReconnectError.notPaused(info.currentTransportState, info.currentTransportStatus)
+                            }
+                        } else {
+                            guard info.currentTransportState == "STOPPED" else {
+                                throw SonosReconnectError.notStopped(info.currentTransportState, info.currentTransportStatus)
+                            }
+                        }
+                        await streamer.stop()
+                        tone?.stop()
+                        print("PASS: external action was respected.")
+                        exit(0)
+                    }
                     let disconnected = streamer.disconnectClientsForTesting()
                     print("Forced media disconnect for \(disconnected) client(s).")
                     guard disconnected > 0 else { throw SonosReconnectError.noClients }

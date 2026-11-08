@@ -471,11 +471,13 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
   music from the SoundCast virtual output on a SYMFONISK speaker, including
   a roughly three-minute session. The stream uses a large fixed HTTP/WAV length
   and real-time pacing. In a forced media-disconnect test SoundCast retried
-  playback successfully; silent tests also verified explicit stop and source
-  change handling. A stop from another controller may be mistaken for an
-  interruption and retried. Mixed AirPlay and Sonos output can use a manually
-  calibrated delay, but is not clock-synchronized. Longer playback, range
-  requests, and other receivers remain unverified. Sonos UI integration is not implemented, and AirPlay-enabled
+  playback successfully; silent tests also verified SoundCast stop, source
+  change, and external UPnP Stop and Pause handling. Recovery depends on the
+  receiver reconnecting within five seconds after an established stream
+  disconnects; other receiver behavior and longer outages may not recover.
+  Mixed AirPlay and Sonos output can use a manually calibrated delay, but is
+  not clock-synchronized. Longer playback, range requests, and other receivers
+  remain unverified. Sonos UI integration is not implemented, and AirPlay-enabled
   Sonos devices are not independently validated.
 
 ## 11. Phase 1.5 status and findings (2026-11-06)

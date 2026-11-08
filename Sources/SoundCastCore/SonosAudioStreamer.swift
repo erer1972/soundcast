@@ -38,6 +38,7 @@ public final class SonosAudioStreamer: @unchecked Sendable {
 
     /// Starts a per-receiver WAV feed and asks the Sonos to play its URI.
     public func start() async throws {
+        try SonosHTTPAudioServer.validateSampleRate(sampleRate)
         guard let session = beginStart() else { throw StreamerError.alreadyStarted }
 
         let mirror = RingBuffer(capacitySamples: Int(sampleRate.rounded() * (delaySeconds + 2)) * 2)
