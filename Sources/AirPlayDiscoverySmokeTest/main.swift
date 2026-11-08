@@ -1,11 +1,29 @@
 import Foundation
 import SoundCastCore
 
+enum SonosReconnectError: Error, CustomStringConvertible {
+    case noClients
+    case notPlaying(String, String)
+    case notStopped(String, String)
+
+    var description: String {
+        switch self {
+        case .noClients: return "no media connection was available to interrupt"
+        case .notPlaying(let state, let status): return "transport did not resume: \(state)/\(status)"
+        case .notStopped(let state, let status): return "transport did not stay stopped: \(state)/\(status)"
+        }
+    }
+}
+
 final class SonosTestTone: @unchecked Sendable {
     private let buffer: RingBuffer
+    private let amplitude: Float
     private let stopSignal = DispatchSemaphore(value: 0)
 
-    init(buffer: RingBuffer) { self.buffer = buffer }
+    init(buffer: RingBuffer, amplitude: Float = 0.1) {
+        self.buffer = buffer
+        self.amplitude = amplitude
+    }
 
     func start() {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
@@ -13,7 +31,7 @@ final class SonosTestTone: @unchecked Sendable {
             var samples = [Float](repeating: 0, count: 960)
             while stopSignal.wait(timeout: .now()) == .timedOut {
                 for frame in 0..<480 {
-                    let sample = Float(sin(phase) * 0.1)
+                    let sample = Float(sin(phase)) * amplitude
                     samples[frame * 2] = sample
                     samples[frame * 2 + 1] = sample
                     phase += 2 * Double.pi * 440 / 48_000
@@ -63,14 +81,26 @@ if args.first == "--capture-level" || args.first == "--capture-level-virtual" {
     }
     exit(0)
 }
-let sonosToneMode = args.first == "--sonos-tone"
-let sonosVirtualMode = args.first == "--sonos-virtual"
+let sonosManualRetryMode = args.first == "--sonos-retry-probe"
+let sonosStopProbe = args.first == "--sonos-stop-probe"
+let sonosSwitchProbe = args.first == "--sonos-switch-probe"
+let sonosSilentReconnectMode = args.first == "--sonos-reconnect-silent" || sonosStopProbe || sonosSwitchProbe
+let sonosReconnectMode = args.first == "--sonos-reconnect" || sonosManualRetryMode || sonosSilentReconnectMode
+let sonosToneMode = args.first == "--sonos-tone" || sonosReconnectMode
+let dualCastMode = args.first == "--dual-cast"
+let sonosVirtualMode = args.first == "--sonos-virtual" || dualCastMode
 let sonosLiveMode = args.first == "--sonos-live" || sonosToneMode || sonosVirtualMode
 let sonosMode = args.first == "--sonos" || args.first == "--sonos-wav" || sonosLiveMode
 let sonosWAVMode = args.first == "--sonos-wav"
 if sonosMode { args.removeFirst() }
+let airplayTargetName = dualCastMode && !args.isEmpty ? args.removeFirst() : nil
 let sonosTargetName = sonosLiveMode && !args.isEmpty ? args.removeFirst() : nil
 let durationSeconds = args.first.flatMap(Double.init) ?? 8.0
+let sonosDelaySeconds = dualCastMode && args.count > 1 ? (Double(args[1]) ?? 0) : 0
+if sonosReconnectMode && (!durationSeconds.isFinite || durationSeconds < 25) {
+    print("FAIL: --sonos-reconnect requires a duration of at least 25 seconds.")
+    exit(1)
+}
 let serverDurationSeconds = sonosWAVMode && args.count > 1
     ? (Double(args[1]) ?? durationSeconds)
     : durationSeconds
@@ -126,28 +156,121 @@ if sonosMode {
         } else {
             capture = ProcessTapCapture(ringBuffer: captureBuffer)
         }
-        let tone = sonosToneMode ? SonosTestTone(buffer: captureBuffer) : nil
+        let tone = sonosToneMode ? SonosTestTone(buffer: captureBuffer, amplitude: sonosSilentReconnectMode ? 0 : 0.1) : nil
+        var airplaySender: AirPlayRealtimeSender?
+        var airplayClock: AirPlayPTPClock?
         do {
             try capture?.start()
             tone?.start()
+            if dualCastMode {
+                guard let airplayTargetName else {
+                    throw NSError(domain: "DualCast", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing AirPlay receiver name"])
+                }
+                let airplayReceiver = try await AirPlayReceiverResolver.resolve(serviceName: airplayTargetName)
+                let clock = try AirPlayPTPClock(peerIPv4: airplayReceiver.ipv4)
+                airplayClock = clock
+                clock.start()
+                let sender = AirPlayRealtimeSender(
+                    receiver: airplayReceiver, identity: AirPlayIdentity.loadOrCreate(), ptpClock: clock,
+                    source: captureBuffer, inputSampleRate: capture?.sampleRate ?? 48_000
+                )
+                airplaySender = sender
+                sender.onFailure = { error in NSLog("[SoundCast][DualCast] AirPlay failed: \(error)") }
+                try await sender.start()
+                print("AirPlay stream started for \(airplayTargetName).")
+            }
             let streamer = SonosAudioStreamer(
-                receiver: receiver, source: captureBuffer, sampleRate: capture?.sampleRate ?? 48_000
+                receiver: receiver, source: captureBuffer, sampleRate: capture?.sampleRate ?? 48_000,
+                delaySeconds: sonosDelaySeconds
             )
             do {
                 try await streamer.start()
-                print("Sonos stream started for \(durationSeconds)s. \(sonosToneMode ? "Playing test tone." : "Now open the audio source on this Mac.")")
-                try await Task.sleep(nanoseconds: UInt64(durationSeconds * 1_000_000_000))
+                print("Sonos stream started for \(durationSeconds)s. \(sonosSilentReconnectMode ? "Playing silence." : sonosToneMode ? "Playing test tone." : "Now open the audio source on this Mac.")")
+                if sonosReconnectMode {
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    let disconnected = streamer.disconnectClientsForTesting()
+                    print("Forced media disconnect for \(disconnected) client(s).")
+                    guard disconnected > 0 else { throw SonosReconnectError.noClients }
+                    if sonosSwitchProbe {
+                        guard let peerIPv4 = receiver.descriptionURL.host else {
+                            throw NSError(domain: "SonosSwitchProbe", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing speaker address"])
+                        }
+                        let silence = RingBuffer(capacitySamples: 48_000 * 4)
+                        let alternateServer = SonosHTTPAudioServer(source: silence, sampleRate: 48_000)
+                        let alternateURI = try alternateServer.start(peerIPv4: peerIPv4)
+                        defer { alternateServer.stop() }
+                        do {
+                            try await SonosUPnPClient.setAVTransportURI(for: receiver, uri: alternateURI)
+                            try await Task.sleep(nanoseconds: 6_000_000_000)
+                            var info = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                            if info.currentTransportState != "PLAYING" {
+                                try await SonosUPnPClient.play(receiver)
+                            }
+                            await streamer.stop()
+                            try await Task.sleep(nanoseconds: 2_000_000_000)
+                            let uri = try await SonosUPnPClient.getCurrentURI(for: receiver)
+                            info = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                            print("Transport after source change and stop: \(info.currentTransportState)/\(info.currentTransportStatus), URI=\(uri)")
+                            guard uri == alternateURI.absoluteString, info.currentTransportState == "PLAYING" else {
+                                throw SonosReconnectError.notPlaying(info.currentTransportState, info.currentTransportStatus)
+                            }
+                            try await SonosUPnPClient.stop(receiver)
+                        } catch {
+                            try? await SonosUPnPClient.stop(receiver)
+                            throw error
+                        }
+                        tone?.stop()
+                        print("PASS: recovery and stop left the new source playing.")
+                        exit(0)
+                    }
+                    if sonosStopProbe {
+                        try await Task.sleep(nanoseconds: 200_000_000)
+                        await streamer.stop()
+                        tone?.stop()
+                        try await Task.sleep(nanoseconds: 6_000_000_000)
+                        let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                        print("Transport after stop: \(info.currentTransportState)/\(info.currentTransportStatus)")
+                        guard info.currentTransportState == "STOPPED" else {
+                            throw SonosReconnectError.notStopped(info.currentTransportState, info.currentTransportStatus)
+                        }
+                        print("PASS: stopped playback did not resume.")
+                        exit(0)
+                    }
+                    try await Task.sleep(nanoseconds: 15_000_000_000)
+                    let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                    print("Transport after disconnect: \(info.currentTransportState)/\(info.currentTransportStatus)")
+                    var recovered = info
+                    if sonosManualRetryMode && info.currentTransportState == "STOPPED" {
+                        print("Retrying Play after disconnect.")
+                        try await SonosUPnPClient.play(receiver)
+                        try await Task.sleep(nanoseconds: 3_000_000_000)
+                        recovered = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                        print("Transport after retry: \(recovered.currentTransportState)/\(recovered.currentTransportStatus)")
+                    }
+                    guard recovered.currentTransportState == "PLAYING", recovered.currentTransportStatus == "OK" else {
+                        throw SonosReconnectError.notPlaying(recovered.currentTransportState, recovered.currentTransportStatus)
+                    }
+                    if durationSeconds > 25 {
+                        try await Task.sleep(nanoseconds: UInt64((durationSeconds - 25) * 1_000_000_000))
+                    }
+                } else {
+                    try await Task.sleep(nanoseconds: UInt64(durationSeconds * 1_000_000_000))
+                }
                 await streamer.stop()
+                await airplaySender?.stop()
+                airplayClock?.stop()
                 tone?.stop()
                 capture?.stop()
                 print("PASS: Sonos stream stopped cleanly.")
             } catch {
                 await streamer.stop()
-                tone?.stop()
-                capture?.stop()
                 throw error
             }
         } catch {
+            await airplaySender?.stop()
+            airplayClock?.stop()
+            tone?.stop()
+            capture?.stop()
             print("\nFAIL: Sonos live stream failed: \(error)")
             exit(1)
         }

@@ -468,10 +468,14 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
 4. **Phase 3 — Sonos S1 backend groundwork in progress.** Bonjour discovery
   via `_sonos._tcp`, UPnP description parsing, AVTransport control, and
   experimental HTTP WAV streaming are implemented. A CLI test audibly played
-  music from the SoundCast virtual output on a SYMFONISK speaker. The stream
-  uses a large fixed HTTP/WAV length and real-time pacing; long-running playback,
-  range requests, other receivers, and multi-room synchronization remain
-  unverified. Sonos UI integration is not implemented, and AirPlay-enabled
+  music from the SoundCast virtual output on a SYMFONISK speaker, including
+  a roughly three-minute session. The stream uses a large fixed HTTP/WAV length
+  and real-time pacing. In a forced media-disconnect test SoundCast retried
+  playback successfully; silent tests also verified explicit stop and source
+  change handling. A stop from another controller may be mistaken for an
+  interruption and retried. Mixed AirPlay and Sonos output can use a manually
+  calibrated delay, but is not clock-synchronized. Longer playback, range
+  requests, and other receivers remain unverified. Sonos UI integration is not implemented, and AirPlay-enabled
   Sonos devices are not independently validated.
 
 ## 11. Phase 1.5 status and findings (2026-11-06)

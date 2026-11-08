@@ -21,7 +21,7 @@ public enum SonosUPnPClient {
             case .unexpectedHTTPStatus(let status):
                 return "Sonos AVTransport returned HTTP \(status)"
             case .malformedResponse:
-                return "Sonos GetTransportInfo response is missing transport fields"
+                return "Sonos AVTransport response is missing required fields"
             }
         }
     }
@@ -74,6 +74,17 @@ public enum SonosUPnPClient {
         )
     }
 
+    public static func getCurrentURI(for receiver: SonosReceiver) async throws -> String {
+        let data = try await performAction("GetMediaInfo", receiver: receiver, arguments: [("InstanceID", "0")])
+        let parserDelegate = TransportInfoParser(expectedElements: ["CurrentURI"])
+        let parser = XMLParser(data: data)
+        parser.delegate = parserDelegate
+        guard parser.parse(), let uri = parserDelegate.value(for: "CurrentURI") else {
+            throw ClientError.malformedResponse
+        }
+        return uri
+    }
+
     private static func performAction(
         _ action: String,
         receiver: SonosReceiver,
@@ -120,12 +131,14 @@ public enum SonosUPnPClient {
 }
 
 private final class TransportInfoParser: NSObject, XMLParserDelegate {
-    private let expectedElements: Set<String> = [
-        "CurrentTransportState", "CurrentTransportStatus", "CurrentSpeed",
-    ]
+    private let expectedElements: Set<String>
     private var currentElement: String?
     private var currentText = ""
     private var values: [String: String] = [:]
+
+    init(expectedElements: Set<String> = ["CurrentTransportState", "CurrentTransportStatus", "CurrentSpeed"]) {
+        self.expectedElements = expectedElements
+    }
 
     func value(for element: String) -> String? {
         values[element]?.trimmingCharacters(in: .whitespacesAndNewlines)

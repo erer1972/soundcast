@@ -133,18 +133,29 @@ These commands use the built `AirPlayDiscoverySmokeTest` executable:
 ./dist/AirPlayDiscoverySmokeTest --sonos-wav 2 10
 ./dist/AirPlayDiscoverySmokeTest --sonos-tone "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-virtual "SYMFONISK Table lamp" 45
+./dist/AirPlayDiscoverySmokeTest --sonos-reconnect "SYMFONISK Table lamp" 25
+./dist/AirPlayDiscoverySmokeTest --sonos-reconnect-silent "SYMFONISK Table lamp" 25
+./dist/AirPlayDiscoverySmokeTest --sonos-stop-probe "SYMFONISK Table lamp" 25
+./dist/AirPlayDiscoverySmokeTest --sonos-switch-probe "SYMFONISK Table lamp" 25
+./dist/AirPlayDiscoverySmokeTest --dual-cast "kaan" "SYMFONISK Table lamp" 120 2.5
 ```
 
 The first two commands only discover/query the speaker or serve silence;
-the last two change its playback and play audio. Replace the name with the
-discovered Sonos name. For `--sonos-virtual`, route an audio source to the
-main SoundCast virtual output while the test runs. A process-tap capture mode
-is also available as `--sonos-live`, but was silent in the most recent test
-with the virtual device selected as the Mac's default output.
+the others change its playback. The silent probes play silence and interrupt
+or change the selected source. Replace the names with your discovered receiver
+names. For `--sonos-virtual` and `--dual-cast`, route audio to the main
+SoundCast virtual output while the test runs. The optional final dual-cast
+argument delays Sonos by that many seconds. A process-tap capture mode is also
+available as `--sonos-live`, but was silent in the most recent test with the
+virtual device selected as the Mac's default output.
 
-The WAV endpoint uses a large fixed length for a live stream. Continuous
-playback beyond a short smoke test, other Sonos models, range requests, and
-multi-room synchronization remain unverified.
+The WAV endpoint uses a large fixed length for a live stream. A roughly
+three-minute virtual-device music test completed. On a forced connection drop,
+the SYMFONISK resumed after a SoundCast retry; explicit SoundCast stop and a
+source change were also tested. A stop from another controller may be
+indistinguishable from an interruption and trigger a retry. The mixed AirPlay
+and Sonos delay is manually calibrated, not clock-synchronized. Longer
+playback, other Sonos models, and range requests remain unverified.
 
 ## Using it
 

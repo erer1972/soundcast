@@ -24,14 +24,18 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
     private static let waveLength: UInt32 = 2_147_483_644
     private let source: RingBuffer
     private let sampleRate: Double
+    private let delaySeconds: Double
+    private let onStreamInterrupted: (@Sendable () -> Void)?
     private let lock = NSLock()
     private var listenerSocket: Int32 = -1
     private var running = false
     private var clients: Set<Int32> = []
 
-    public init(source: RingBuffer, sampleRate: Double) {
+    public init(source: RingBuffer, sampleRate: Double, delaySeconds: Double = 0, onStreamInterrupted: (@Sendable () -> Void)? = nil) {
         self.source = source
         self.sampleRate = sampleRate
+        self.delaySeconds = delaySeconds.isFinite ? max(0, min(10, delaySeconds)) : 0
+        self.onStreamInterrupted = onStreamInterrupted
     }
 
     /// Starts an HTTP listener on the interface routed to the Sonos and
@@ -123,6 +127,13 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         for client in activeClients { _ = Darwin.shutdown(client, SHUT_RDWR) }
     }
 
+    public func disconnectClientsForTesting() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        for client in clients { _ = Darwin.shutdown(client, SHUT_RDWR) }
+        return clients.count
+    }
+
     private func acceptLoop(_ listener: Int32) {
         NSLog("[SoundCast][SonosHTTPAudioServer] accept loop started")
         while isRunning {
@@ -188,15 +199,25 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         var peak: Float = 0
         var chunks = 0
         var remaining = Int(Self.waveLength) - 44
+        var silentFrames = Int(sampleRate * delaySeconds)
         var nextDeadline = ProcessInfo.processInfo.systemUptime
         defer { NSLog("[SoundCast][SonosHTTPAudioServer] stream ended: \(chunks) chunks, peak \(peak)") }
         while isRunning && remaining > 0 {
             var samples = [Float](repeating: 0, count: Self.chunkFrames * 2)
-            samples.withUnsafeMutableBufferPointer { source.read(into: $0.baseAddress!, count: $0.count) }
+            let silent = min(silentFrames, Self.chunkFrames)
+            silentFrames -= silent
+            if silent < Self.chunkFrames {
+                samples.withUnsafeMutableBufferPointer {
+                    source.read(into: $0.baseAddress!.advanced(by: silent * 2), count: $0.count - silent * 2)
+                }
+            }
             for sample in samples where sample.isFinite { peak = max(peak, abs(sample)) }
             let data = Self.pcm16(samples)
             let count = min(remaining, data.count)
-            guard sendAll(client, Data(data.prefix(count))) else { return }
+            guard sendAll(client, Data(data.prefix(count))) else {
+                if chunks >= 150 && isRunning { onStreamInterrupted?() }
+                return
+            }
             remaining -= count
             chunks += 1
             nextDeadline += Double(Self.chunkFrames) / sampleRate
