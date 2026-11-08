@@ -444,7 +444,7 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
 
 ## 9. Open questions carried over from v1 §7, plus new ones from §7/§8
 
-- (v1, unresolved) WAV vs. compressed for the Sonos HTTP stream — defaulting to WAV per your note that v1's defaults are fine.
+- (Sonos S1 smoke test) Live PCM WAV playback worked on a SYMFONISK speaker; compressed formats and other receivers remain unverified.
 - (v1, unresolved) "other Macs" = macOS's built-in AirPlay Receiver feature — assumed yes per your note that v1's defaults are fine.
 - **(resolved)** Signing: self-signed local identity, no paid account, no notarization — §7.2.
 - **(answered on the Mac Pro)** `coreaudiod` loads the self-signed `AudioServerPlugIn` on the Tahoe/OCLP Mac Pro; the stock-SIP Intel MacBook remains unverified.
@@ -466,11 +466,13 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
   Receiver-initiated stop or restart, multi-room sync, and manual testing of
   the in-app pairing UI remain.
 4. **Phase 3 — Sonos S1 backend groundwork in progress.** Bonjour discovery
-  via `_sonos._tcp`, UPnP description parsing, and read-only AVTransport
-  `GetTransportInfo` are implemented and verified on a real receiver
-  (`STOPPED/OK/1`). HTTP audio streaming, playback control, and UI integration
-  remain unimplemented; AirPlay-enabled Sonos devices are not independently
-  validated.
+  via `_sonos._tcp`, UPnP description parsing, AVTransport control, and
+  experimental HTTP WAV streaming are implemented. A CLI test audibly played
+  music from the SoundCast virtual output on a SYMFONISK speaker. The stream
+  uses a large fixed HTTP/WAV length and real-time pacing; long-running playback,
+  range requests, other receivers, and multi-room synchronization remain
+  unverified. Sonos UI integration is not implemented, and AirPlay-enabled
+  Sonos devices are not independently validated.
 
 ## 11. Phase 1.5 status and findings (2026-11-06)
 

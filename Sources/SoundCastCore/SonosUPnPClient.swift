@@ -26,34 +26,38 @@ public enum SonosUPnPClient {
         }
     }
 
+    public static func setAVTransportURI(for receiver: SonosReceiver, uri: URL, metadata: String = "") async throws {
+        _ = try await performAction(
+            "SetAVTransportURI",
+            receiver: receiver,
+            arguments: [("InstanceID", "0"), ("CurrentURI", uri.absoluteString), ("CurrentURIMetaData", metadata)]
+        )
+    }
+
+    public static func play(_ receiver: SonosReceiver) async throws {
+        _ = try await performAction("Play", receiver: receiver, arguments: [("InstanceID", "0"), ("Speed", "1")], timeout: 20)
+    }
+
+    public static func stop(_ receiver: SonosReceiver) async throws {
+        _ = try await performAction("Stop", receiver: receiver, arguments: [("InstanceID", "0")])
+    }
+
+        public static func liveWAVMetadata(uri: URL, sampleRate: UInt32, channels: UInt16 = 2, bitsPerSample: UInt16 = 16) -> String {
+                let protocolInfo = "http-get:*:audio/wav:DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=0d500000000000000000000000000000"
+                return """
+                <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dlna="urn:schemas-dlna-org:metadata-1-0/">
+                    <item id="1" parentID="0" restricted="1">
+                        <dc:title>SoundCast live audio</dc:title>
+                        <upnp:class>object.item.audioItem.audioBroadcast</upnp:class>
+                        <res protocolInfo="\(protocolInfo)" sampleFrequency="\(sampleRate)" bitsPerSample="\(bitsPerSample)" nrAudioChannels="\(channels)">\(escapeXML(uri.absoluteString))</res>
+                    </item>
+                </DIDL-Lite>
+                """
+        }
+
     /// Reads transport state only; it does not start, stop, or alter playback.
     public static func getTransportInfo(for receiver: SonosReceiver) async throws -> SonosTransportInfo {
-        guard let controlURL = receiver.avTransportControlURL else {
-            throw ClientError.missingAVTransportService
-        }
-
-        var request = URLRequest(url: controlURL)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 3
-        request.setValue("text/xml; charset=\"utf-8\"", forHTTPHeaderField: "Content-Type")
-        request.setValue("\"\(serviceType)#GetTransportInfo\"", forHTTPHeaderField: "SOAPAction")
-        request.httpBody = Data("""
-        <?xml version="1.0" encoding="utf-8"?>
-        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-          <s:Body>
-            <u:GetTransportInfo xmlns:u="\(serviceType)">
-              <InstanceID>0</InstanceID>
-            </u:GetTransportInfo>
-          </s:Body>
-        </s:Envelope>
-        """.utf8)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw ClientError.unexpectedHTTPStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
-        }
-
+        let data = try await performAction("GetTransportInfo", receiver: receiver, arguments: [("InstanceID", "0")])
         let parserDelegate = TransportInfoParser()
         let parser = XMLParser(data: data)
         parser.delegate = parserDelegate
@@ -68,6 +72,50 @@ public enum SonosUPnPClient {
             currentTransportStatus: status,
             currentSpeed: speed
         )
+    }
+
+    private static func performAction(
+        _ action: String,
+        receiver: SonosReceiver,
+        arguments: [(String, String)],
+        timeout: TimeInterval = 3
+    ) async throws -> Data {
+        guard let controlURL = receiver.avTransportControlURL else {
+            throw ClientError.missingAVTransportService
+        }
+
+        let argumentXML = arguments.map { name, value in
+            "<\(name)>\(escapeXML(value))</\(name)>"
+        }.joined()
+        var request = URLRequest(url: controlURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        request.setValue("text/xml; charset=\"utf-8\"", forHTTPHeaderField: "Content-Type")
+        request.setValue("\"\(serviceType)#\(action)\"", forHTTPHeaderField: "SOAPAction")
+        request.httpBody = Data("""
+        <?xml version="1.0" encoding="utf-8"?>
+        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+          <s:Body>
+            <u:\(action) xmlns:u="\(serviceType)">\(argumentXML)</u:\(action)>
+          </s:Body>
+        </s:Envelope>
+        """.utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode) else {
+            throw ClientError.unexpectedHTTPStatus((response as? HTTPURLResponse)?.statusCode ?? -1)
+        }
+        return data
+    }
+
+    private static func escapeXML(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
     }
 }
 

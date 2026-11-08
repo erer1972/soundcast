@@ -21,10 +21,11 @@ Status: **Phase 1 + 1.5 done. Phase 2 (AirPlay 2 sender) in progress.**
   streaming, and retry after a simulated session drop are implemented.
   Pairing and audible playback were validated on two AppleTV6,2 receivers;
   receiver-initiated stops/restarts and multi-room sync remain unverified.
-  The in-menu pairing UI still needs a manual test. Sonos S1 discovery and
-  read-only transport status are implemented; HTTP audio streaming and UI
-  integration remain future work. AirPlay-enabled Sonos receivers are not
-  independently validated.
+  The in-menu pairing UI still needs a manual test. Sonos S1 discovery,
+  playback control, and experimental WAV streaming are implemented in the
+  backend. A CLI test played audio from the SoundCast virtual device on a
+  SYMFONISK speaker; Sonos integration in the app UI remains future work.
+  AirPlay-enabled Sonos receivers are not independently validated.
 
 See `docs/DESIGN.md` for the full architecture, the research behind the
 AirPlay 2 and HAL-driver decisions, and the phase plan.
@@ -123,13 +124,35 @@ SoundCast's entry, it'll re-prompt next launch.
 AirPlay discovery also needs local-network access. Allow that prompt so
 SoundCast can browse and connect to receivers on your network.
 
+### Sonos backend smoke tests
+
+These commands use the built `AirPlayDiscoverySmokeTest` executable:
+
+```sh
+./dist/AirPlayDiscoverySmokeTest --sonos 5
+./dist/AirPlayDiscoverySmokeTest --sonos-wav 2 10
+./dist/AirPlayDiscoverySmokeTest --sonos-tone "SYMFONISK Table lamp" 25
+./dist/AirPlayDiscoverySmokeTest --sonos-virtual "SYMFONISK Table lamp" 45
+```
+
+The first two commands only discover/query the speaker or serve silence;
+the last two change its playback and play audio. Replace the name with the
+discovered Sonos name. For `--sonos-virtual`, route an audio source to the
+main SoundCast virtual output while the test runs. A process-tap capture mode
+is also available as `--sonos-live`, but was silent in the most recent test
+with the virtual device selected as the Mac's default output.
+
+The WAV endpoint uses a large fixed length for a live stream. Continuous
+playback beyond a short smoke test, other Sonos models, range requests, and
+multi-room synchronization remain unverified.
+
 ## Using it
 
 - **Casting toggle**: on/off for the whole capture+output pipeline.
 - **Device list**: grouped "This Mac" / "Bluetooth" / "AirPlay" / "Sonos".
-  AirPlay receivers are discovered and selectable; Sonos-specific S1/UPnP
-  output is not implemented yet. AirPlay-enabled Sonos devices may appear
-  under AirPlay, but have not been independently validated. Click a device
+  AirPlay receivers are discovered and selectable; the experimental Sonos
+  S1/UPnP backend is not yet selectable in the app. AirPlay-enabled Sonos
+  devices may appear under AirPlay, but have not been independently validated. Click a device
   to tick/untick it; multi-select works — tick several at once.
 - **Per-device slider**: appears under a ticked device, controls that
   device's own gain.
