@@ -459,10 +459,12 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
 2. **Phase 1.5 — complete on the Mac Pro 5,1.** The signed HAL driver,
   shared-memory path, five presets, and simultaneous independent sessions
   have been validated. The Intel MacBook remains untested.
-3. **Phase 2 — working on `kaan` (AppleTV6,2).** Discovery, pair-setup/
-  pair-verify, realtime audio, retransmits, long-run drift, and retry after
-  an injected session drop have been validated. Receiver-initiated stop or
-  restart, multi-room sync, and manual testing of the in-app pairing UI remain.
+3. **Phase 2 — validated on two AppleTV6,2 receivers.** Discovery,
+  pair-setup/pair-verify, realtime audio, retransmits, long-run drift, and
+  retry after an injected session drop have been validated. Audible production
+  app playback has now been confirmed on a second receiver as well.
+  Receiver-initiated stop or restart, multi-room sync, and manual testing of
+  the in-app pairing UI remain.
 4. **Phase 3 — not started.** Sonos S1/UPnP and multi-room synchronization
   remain planned; AirPlay-enabled Sonos devices are discovered but not
   independently validated.
@@ -811,6 +813,12 @@ isn't repeated:
     app process: the initial session plus seven re-establishments, about
     17 seconds apart. This verifies retry after a simulated session loss;
     a real receiver restart, sleep, or remote-stop is still untested.
+  - **Second receiver pairing and playback (2026-11-08, AppleTV6,2).**
+    Pair-setup completed through the CLI smoke test; pair-verify then
+    established an encrypted session and `GET /info` returned 200. The
+    production app connected over RTSP, initialized ALAC, and streamed an
+    audio source that was confirmed audible. The in-menu pairing UI and
+    simultaneous playback to multiple receivers remain untested.
   - Still open:
     - multi-receiver sync quality (shared clock, but untested with two
       rooms);

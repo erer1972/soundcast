@@ -18,11 +18,12 @@ Status: **Phase 1 + 1.5 done. Phase 2 (AirPlay 2 sender) in progress.**
   Turn it on from the menu bar ("Show Floating Panel").
 - **Single instance:** launching a second copy exits immediately.
 - **Phase 2 (in progress):** AirPlay discovery, PIN pairing, realtime
-  streaming, and retry after a simulated session drop are implemented and
-  validated on `kaan` (AppleTV6,2). Receiver-initiated stops/restarts and
-  multi-room sync remain unverified. Sonos-specific S1/UPnP support is
-  planned for Phase 3; AirPlay-enabled Sonos receivers are not independently
-  validated.
+  streaming, and retry after a simulated session drop are implemented.
+  Pairing and audible playback were validated on two AppleTV6,2 receivers;
+  receiver-initiated stops/restarts and multi-room sync remain unverified.
+  The in-menu pairing UI still needs a manual test. Sonos-specific S1/UPnP
+  support is planned for Phase 3; AirPlay-enabled Sonos receivers are not
+  independently validated.
 
 See `docs/DESIGN.md` for the full architecture, the research behind the
 AirPlay 2 and HAL-driver decisions, and the phase plan.
