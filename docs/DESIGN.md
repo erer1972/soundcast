@@ -1,6 +1,8 @@
 # SoundCast — Design Doc v2
 
-Status: **draft for review — no code written yet, per the agreed process.**
+Status: **implementation record, updated 2026-11-08. Phases 1 and 1.5 are
+complete; AirPlay casting works on `kaan`. Receiver-driven recovery and
+multi-room synchronization remain open.**
 
 Changes from v1: added a system-wide virtual Core Audio output device (HAL
 `AudioServerPlugIn`) so *any* app/web page can target rooms via the normal
@@ -15,7 +17,7 @@ HAL plugin since it runs inside `coreaudiod`.
 |---|---|
 | Private-API shortcut to multi-device AirPlay? | **No** — confirmed (v1 §1), restricted entitlement, dead end. |
 | Is the process tap private API? | **No** — public since macOS 14.2 (v1 §2). |
-| Can a HAL virtual-audio driver (BlackHole-style) still be loaded on macOS 26 Tahoe with free ad-hoc signing? | **Genuinely unresolved by research — must be tested on your actual Mac, no paid account either way (your decision).** Evidence is contradictory: one report reasons `coreaudiod`'s plug-in hosting likely doesn't enforce same-Team-ID library validation (plausible — that would break every third-party driver, Developer-ID-signed ones included); but a separate real-world Tahoe report shows even a *valid, Developer-ID-signed* driver failing to be instantiated by `coreaudiod` for unclear reasons. That second data point is actually reassuring for going free: paying $99 isn't a confirmed fix either right now, this early in Tahoe's life. See revised §7.2. |
+| Can a HAL virtual-audio driver (BlackHole-style) load on macOS 26 with local signing? | **Yes on the Mac Pro 5,1 with its OCLP configuration; not yet verified on the stock-SIP Intel MacBook.** See §7.2. |
 | Chosen AirPlay 2 route | Native Swift reimplementation (v1 §4), unchanged. |
 | Hard new constraint | **No AVX/AVX2/FMA/F16C anywhere, ever** — Mac Pro 5,1's Westmere Xeon doesn't have it, and an illegal instruction inside the HAL plugin crashes `coreaudiod`, i.e. all audio on the Mac. See §8. |
 
@@ -196,7 +198,7 @@ every rebuild gets a new hash, and TCC's stored grant (the audio-capture
 permission prompt) is keyed to that hash, so every rebuild would re-prompt
 or silently lose the grant. A **self-signed code-signing certificate**
 (Keychain's "Self Signed Root" + "Code Signing" type, generated once,
-stored in the login keychain) gives a stable signing identity: re-signing
+stored in the dedicated `soundcast-build` keychain) gives a stable signing identity: re-signing
 with the *same* self-signed cert across rebuilds keeps the designated
 requirement's anchor constant, so TCC's grant survives rebuilds. This
 doesn't need to be publicly trusted or chain to Apple at all — TCC only
@@ -283,10 +285,9 @@ world we're in cheaply:
    ever want the system-wide virtual device and local signing didn't work
    for you, this is the $99/yr path" — nothing more, per your instruction.
 
-I'm not spending Phase 1.5 effort on shared memory, XPC, or room presets
-until step 2 (or 3/4) of that test actually succeeds on your hardware —
-building those out against an untested loading assumption would be
-wasted work if the answer turns out to be "no."
+This was the pre-implementation gate. It passed on the Mac Pro 5,1;
+subsequent driver, shared-memory, and preset implementation is recorded
+in §§7.1-7.3 and §11.
 
 ### 7.3 Room presets as additional virtual devices
 
@@ -446,62 +447,25 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
 - (v1, unresolved) WAV vs. compressed for the Sonos HTTP stream — defaulting to WAV per your note that v1's defaults are fine.
 - (v1, unresolved) "other Macs" = macOS's built-in AirPlay Receiver feature — assumed yes per your note that v1's defaults are fine.
 - **(resolved)** Signing: self-signed local identity, no paid account, no notarization — §7.2.
-- **(new, answered empirically in Phase 1.5 step 1, not something to decide now)** Whether `coreaudiod` on your Tahoe/OCLP setup actually loads a self-signed (or ad-hoc, or free-Personal-Team) `AudioServerPlugIn` — genuinely unknown until tested on your hardware, §7.2's go/no-go test.
-- **(data point, Mac Pro 5,1, recorded ahead of Phase 1.5)** `csrutil status` on the Mac Pro: "Custom Configuration" — `Apple Internal`, `Kext Signing`, and `Filesystem Protections` disabled (expected: OCLP's standard root-patch requirement for this machine's unsupported GPU); `Debugging Restrictions`, `DTrace Restrictions`, `NVRAM Protections`, and `BaseSystem Verification` remain **enabled**. This is a partial SIP relaxation, not a blanket one — note that `Kext Signing` governs kernel extensions specifically, not the userspace code-signature/AMFI checks that actually gate whether `coreaudiod` accepts a signed Mach-O bundle like a HAL plugin, so this reading doesn't by itself predict §7.2's go/no-go outcome. Still need the equivalent check on the Intel MacBook, and still need the actual Phase 1.5 test regardless of either machine's SIP posture.
+- **(answered on the Mac Pro)** `coreaudiod` loads the self-signed `AudioServerPlugIn` on the Tahoe/OCLP Mac Pro; the stock-SIP Intel MacBook remains unverified.
+- **(data point, Mac Pro 5,1)** `csrutil status` reports a custom, partially relaxed SIP configuration. That result does not predict whether `coreaudiod` will load the driver on a stock-SIP Mac. The Mac Pro go/no-go test passed (§7.2); the Intel MacBook's equivalent SIP check and driver install test remain open.
   - Confirmed directly via SSH: `sw_vers` reports macOS **26.7.1** (build `25G241`); CPU is a **Xeon W3680 @ 3.33GHz** (Westmere), with a feature-flag list topping out at **SSE4.2** and no AVX/AVX2/FMA/F16C present anywhere in it — directly validating §8's constraint is real, not precautionary.
 - **(new, not blocking, your call whenever)** Are you already building with Xcode / a specific Swift toolchain on the MacBook, or do you want `build.sh` to assume only Apple's bundled `swift`/`swiftc` from Xcode Command Line Tools (simpler, fewer moving parts, and sidesteps any question of a separately-installed toolchain's own default `-march`)?
 
-## 10. Revised phase plan
+## 10. Current phase status (2026-11-08)
 
-Reordered so the feature least exposed to the Tahoe driver-signing
-uncertainty (§7.2) ships and gets proven on real hardware first:
-
-1. **Phase 1 — ✅ DONE, confirmed working on the Mac Pro 5,1 (2026-11-05).**
-   Capture (global process tap, "cast everything" mode, v1 §2) + local
-   multi-output (private aggregate device, per-device gain, master
-   volume, v1 §3) + menu bar UI skeleton (device list grouped by
-   category, checkboxes; AirPlay/Sonos categories show up but with no
-   live discovery wiring yet). `build.sh` ships with the Westmere
-   baseline flags and the `otool`/`objdump` AVX-scan gate from day one
-   (§8) — verified against real compiled output on the real Westmere
-   Xeon, not just the compiler flags. Fully public-API, no-signing-drama
-   path, as predicted — no entitlement or paid-signing issues hit.
-   Validated via two purpose-built CLI smoke-test tools
-   (`LocalOutputSmokeTest`, `CaptureSmokeTest` — see §7.2-adjacent
-   `Sources/`) that exercise the real Core Audio code headlessly: found
-   and fixed one real bug along the way (`AudioBufferList`'s C
-   "struct hack" variable-length array was being copied by value,
-   corrupting any buffer past the first when 2+ devices were targeted —
-   fixed with Apple's `UnsafeMutableAudioBufferListPointer` overlay).
-   Final end-to-end run captured real system audio and rendered it to
-   all 5 of the Mac Pro's discovered local devices simultaneously
-   (Bluetooth speaker + 3 built-in outputs + a virtual loopback device),
-   confirmed audible by you directly. One open oddity, not blocking:
-   the system audio-capture permission was already granted with no
-   consent dialog either of us saw — possibly this Mac's relaxed,
-   non-stock SIP configuration; worth watching for a real prompt on the
-   Intel MacBook, which likely runs stock SIP.
-2. **Phase 1.5** — HAL `AudioServerPlugIn` virtual device (§7), self-signed,
-   no paid account. Starts with §7.2's narrow go/no-go test (minimal
-   silent plugin, self-signed, confirm `coreaudiod` actually instantiates
-   it on your Tahoe/OCLP machine) *before* writing the real feature. Only
-   if that passes: single `SoundCast` device, shared-memory audio path,
-   XPC control channel, install/uninstall script (incl. the
-   `com.apple.provenance` strip). Room presets (§7.3) and the
-   dynamic-vs-static device-creation question follow once the
-   single-device case is proven working. If the go/no-go test fails
-   outright (self-signed, ad-hoc, and free Personal Team all rejected by
-   `coreaudiod`), §7 is shelved and we move straight to Phase 2 with
-   Phase 1's tap mode as the shipped, complete product.
-3. **Phase 2** — AirPlay 2 sender: discovery, pairing, RTSP/RTP streaming,
-   starting with your Apple TV (v1 §4).
-4. **Phase 3** — Sonos S1 (SSDP/UPnP/HTTP) + AirPlay-2-capable Sonos
-   (reuses Phase 2's sender) + Launch at Login + final sync/delay-trim UI
-   polish (v1 §5, §6).
-
-I'll check in with you after each phase, as before — and specifically
-before starting Phase 1.5's code, once §7.2 and the `csrutil status`
-question are answered.
+1. **Phase 1 — complete.** Global process-tap capture and local multi-output
+  were validated audibly on five Mac Pro 5,1 output devices.
+2. **Phase 1.5 — complete on the Mac Pro 5,1.** The signed HAL driver,
+  shared-memory path, five presets, and simultaneous independent sessions
+  have been validated. The Intel MacBook remains untested.
+3. **Phase 2 — working on `kaan` (AppleTV6,2).** Discovery, pair-setup/
+  pair-verify, realtime audio, retransmits, long-run drift, and retry after
+  an injected session drop have been validated. Receiver-initiated stop or
+  restart, multi-room sync, and manual testing of the in-app pairing UI remain.
+4. **Phase 3 — not started.** Sonos S1/UPnP and multi-room synchronization
+  remain planned; AirPlay-enabled Sonos devices are discovered but not
+  independently validated.
 
 ## 11. Phase 1.5 status and findings (2026-11-06)
 
@@ -510,9 +474,9 @@ installs, `coreaudiod` loads it, all five devices (`SoundCast`, `Preset 1-4`)
 activate, and `HALPlugin/test_shm_flow` passes (frames reach shared memory).
 The app builds, is signed, and passes the Westmere AVX gate.
 
-**Not yet verified on hardware:** sustained playback (minutes of music) with the
-rewritten device clock; the app-side chain end to end (virtual device -> ring ->
-`LocalOutputEngine` -> speakers); the floating panel; the single-instance guard.
+**At the time of this 2026-11-06 update, not yet verified:** sustained playback
+with the rewritten device clock; the app-side virtual-device chain; the floating
+panel; and the single-instance guard. Later results are summarized in §10.
 
 ### Findings worth remembering
 
@@ -568,13 +532,13 @@ rewritten device clock; the app-side chain end to end (virtual device -> ring ->
   five fixed slots).
 - Behaviour across sleep/wake, `coreaudiod` crashes, and non-48 kHz clients.
 
-## 12. Phase 2 plan: AirPlay 2 sender (draft for review, no code yet)
+## 12. Phase 2: AirPlay 2 sender — research and implementation record
 
 Goal: tick an Apple TV (later HomePods, other AirPlay 2 speakers) in the menu
 bar list and hear the same audio the local devices play, with the local
 outputs delayed to match.
 
-### 12.1 What the research says (and does not say)
+### 12.1 Initial research snapshot (superseded by the findings in §12.5)
 
 Sources: the unofficial [AirPlay spec](https://openairplay.github.io/airplay-spec/print.html)
 (AirPlay 1 / RAOP era, still the best field reference for `_airplay._tcp` and
@@ -607,7 +571,7 @@ and [pyatv's supported-features page](https://postlund.github.io/pyatv/documenta
 
 ### 12.2 Approach (native Swift, as decided in v1 §4)
 
-Split into milestones, each independently shippable and testable:
+Original milestone plan (implementation status is recorded in §12.5):
 
 | # | Milestone | Risk | Verifiable by |
 |---|-----------|------|---------------|
@@ -617,9 +581,8 @@ Split into milestones, each independently shippable and testable:
 | 2d | **Audio stream.** Encode from the existing ring buffer (AudioToolbox `AudioConverter`, ALAC or AAC-LC, 48 kHz stereo to match the HAL device), packetize, encrypt, send, run the timing/clock exchange the capture says is needed. | High | Audio audible on the Apple TV |
 | 2e | **Integration + sync.** Third consumer of the capture ring (per v1 §6): AirPlay has ~2 s of buffering, so delay the local outputs to match and expose a per-device delay trim. Keeps working with the global tap and the virtual-device sources. | Medium | Local and Apple TV audio line up by ear, then by a click-track measurement |
 
-Plan: do **2a and 2b first** and report back before committing to 2c/2d.
-2c/2d are where the project can fail, so we find out cheaply whether the Apple TV
-accepts transient pairing and what it wants for timing before writing crypto.
+Original sequence: do **2a and 2b first** before deciding whether to implement
+2c/2d. That sequence was superseded by the live protocol work recorded below.
 
 ### 12.3 Constraints that apply here
 
@@ -627,17 +590,15 @@ accepts transient pairing and what it wants for timing before writing crypto.
   the existing `westmereCFlags` / `westmereSwiftFlags`; `build.sh`'s AVX scan stays
   the gate. System frameworks (CryptoKit, AudioToolbox) are Apple's and already run
   on this Mac Pro.
-- **Privileges:** PTP normally uses UDP 319/320. Modern macOS allows non-root
-  wildcard binds to low ports, but this is **unverified on the Mac Pro** and must
-  be tested in 2b/2d. If not, a different approach (device-side clock, or a helper)
-  is needed.
-- **Permissions:** local network access prompt (`NSLocalNetworkUsageDescription`,
-  `NSBonjourServices` for `_airplay._tcp` and `_raop._tcp`) must be added to
-  `Resources/Info.plist`; the self-signed identity (§7.2) should keep the grant
-  stable across rebuilds, as with audio capture.
+- **Privileges:** non-root binds to UDP 319/320 were verified on the Mac Pro
+  during realtime streaming; other target Macs still need testing.
+- **Permissions:** `Resources/Info.plist` declares
+  `NSLocalNetworkUsageDescription` and `NSBonjourServices` for `_airplay._tcp`.
+  The self-signed identity (§7.2) should keep the local-network grant stable
+  across rebuilds, as with audio capture.
 - **No private API, no paid account** (unchanged).
 
-### 12.5 Status (2026-11-06): 2a done, 2c partially done and verified
+### 12.5 Status (updated 2026-11-08): implementation and hardware results
 
 **2a (discovery) — done, validated on real hardware.** `AirPlayDiscovery.swift`
 browses `_airplay._tcp` via `NWBrowser`. One real gotcha: plain
@@ -649,8 +610,8 @@ Network.framework swiftinterface on the Mac Pro after the plain form silently
 found devices with empty metadata. Found "Living Room" (excluded per policy),
 "kaan", and "Sonos" on the real LAN with correct model/feature parsing.
 
-**2c (pairing) — pair-verify done and verified; pair-setup implemented but
-not yet verified live.** This took real detective work, recorded here so it
+**2c (pairing) — pair-verify and pair-setup verified live on the Apple TV.**
+This took real detective work, recorded here so it
 isn't repeated:
 
 - The actual AirPlay control connection uses the receiver's **IPv6
@@ -853,8 +814,9 @@ isn't repeated:
   - Still open:
     - multi-receiver sync quality (shared clock, but untested with two
       rooms);
-    - long-run drift behaviour;
-    - reconnect after a receiver restarts.
+    - drift across longer sessions, different sample rates, or sleep/wake;
+    - receiver-initiated stop/restart (forced sender-side loss was tested
+      on 2026-11-08).
 
   Earlier history: buffered `type=103` path (superseded). The
   original AAC-LC attempt was ACKed and then reset by

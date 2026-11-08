@@ -104,11 +104,9 @@ final class AppState: ObservableObject {
     private var ptpClock: AirPlayPTPClock?
     private let airplayIdentity = AirPlayIdentity.loadOrCreate()
 
-    // Design doc §12 Phase 2 step 1: Bonjour discovery feeds `airplayDevices`
-    // (already-existing published property, previously always empty) so
-    // found rooms show up in the same grouped device list the UI already
-    // renders. Not yet wired to actual output — see DeviceRow's
-    // `isInteractive` check in MenuBarContentView.swift.
+    // Bonjour discovery feeds the grouped AirPlay list; selected receivers
+    // are handled by AirPlayRealtimeSender. Sonos-specific output remains
+    // unimplemented.
     private let airPlayDiscovery = AirPlayDiscovery()
     private var cancellables: Set<AnyCancellable> = []
 

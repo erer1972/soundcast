@@ -17,22 +17,24 @@ Status: **Phase 1 + 1.5 done. Phase 2 (AirPlay 2 sender) in progress.**
   with the master switch, volume and per-source / per-device controls.
   Turn it on from the menu bar ("Show Floating Panel").
 - **Single instance:** launching a second copy exits immediately.
-- **Phase 2 (in progress):** AirPlay 2 sender — Bonjour discovery, pairing,
-  and RTSP/RTP streaming to Apple TVs, HomePods, and other AirPlay
-  receivers, per `docs/DESIGN.md` §12. Sonos is not wired up yet (Phase 3).
+- **Phase 2 (in progress):** AirPlay discovery, PIN pairing, realtime
+  streaming, and retry after a simulated session drop are implemented and
+  validated on `kaan` (AppleTV6,2). Receiver-initiated stops/restarts and
+  multi-room sync remain unverified. Sonos-specific S1/UPnP support is
+  planned for Phase 3; AirPlay-enabled Sonos receivers are not independently
+  validated.
 
 See `docs/DESIGN.md` for the full architecture, the research behind the
 AirPlay 2 and HAL-driver decisions, and the phase plan.
 
-The Core Audio code was first written without a Mac to compile against,
-then fixed forward from real compiler errors and runs on the Mac Pro 5,1
-(Phase 1 confirmed audible on 5 devices at once). Anything marked
-"pending" above has not been verified on hardware yet.
+Core Audio and AirPlay paths have been validated on the Mac Pro 5,1. See
+`docs/DESIGN.md` for current hardware results and the remaining unverified
+cases.
 
 ## Requirements
 
-- macOS 26 (Tahoe) or later — the process-tap API needs 14.2+, Tahoe is
-  well above that; targets both the Intel MacBook and the Mac Pro 5,1.
+- macOS 15 or later is the Swift package deployment target; hardware
+  validation has been performed on macOS 26.7.1 (Tahoe) on the Mac Pro 5,1.
 - Xcode Command Line Tools (`xcode-select --install`) for `swift`,
   `swiftc`, `codesign`, `otool`.
 - No Apple Developer Program membership, no notarization — by design
@@ -46,8 +48,8 @@ cd ~/soundcast   # wherever you've cloned/copied this
 ```
 
 This will, in order:
-1. Create a stable, local, self-signed code-signing identity in your
-   login keychain, if one doesn't already exist (one-time; you'll see a
+1. Create a stable, local, self-signed code-signing identity in its
+  dedicated keychain, if one doesn't already exist (one-time; you'll see a
    single authorization prompt the very first time this runs — that's
    expected).
 2. `swift build -c release`.
@@ -87,7 +89,7 @@ pass `--force`.
 
 ```sh
 cd HALPlugin
-./build_and_test.sh      # compile, Westmere check, sign
+./build_and_test.sh      # build driver and diagnostic, Westmere check, sign
 ./install_and_check.sh   # sudo: copy to /Library/Audio/Plug-Ins/HAL, restart coreaudiod
 ./test_shm_flow          # plays a short sound through it and checks the shared memory
 ```
@@ -116,13 +118,17 @@ self-signed cert `build.sh` sets up): **System Settings → Privacy &
 Security → Microphone** (process-tap capture surfaces here) — remove
 SoundCast's entry, it'll re-prompt next launch.
 
+AirPlay discovery also needs local-network access. Allow that prompt so
+SoundCast can browse and connect to receivers on your network.
+
 ## Using it
 
 - **Casting toggle**: on/off for the whole capture+output pipeline.
-- **Device list**: grouped "This Mac" / "Bluetooth" (populated — Core
-  Audio devices on this machine) / "AirPlay" / "Sonos" (empty until
-  Phase 2/3). Click a device to tick/untick it; multi-select works —
-  tick several at once.
+- **Device list**: grouped "This Mac" / "Bluetooth" / "AirPlay" / "Sonos".
+  AirPlay receivers are discovered and selectable; Sonos-specific S1/UPnP
+  output is not implemented yet. AirPlay-enabled Sonos devices may appear
+  under AirPlay, but have not been independently validated. Click a device
+  to tick/untick it; multi-select works — tick several at once.
 - **Per-device slider**: appears under a ticked device, controls that
   device's own gain.
 - **Master Volume**: overall gain on top of every device's own slider.
@@ -138,7 +144,7 @@ to build and run with nothing but a free Apple ID (not even that, for
 Phase 1) and Xcode's command line tools.
 
 `scripts/create_local_signing_identity.sh` creates a **self-signed**
-code-signing certificate once, in your login keychain, and every build
+code-signing certificate once, in a dedicated `soundcast-build` keychain, and every build
 reuses it. This matters specifically because of how macOS's privacy
 permission system (TCC) tracks grants: a plain **ad-hoc** signature
 (`codesign -s -`) has no persistent identity — every rebuild produces a
@@ -153,8 +159,9 @@ time), so the permission grant survives normal development iteration.
 Not needed for anything in Phase 1 or this README's instructions. If
 you ever want to distribute `SoundCast.app` to another machine *without*
 copying it there directly (e.g. via download, where Gatekeeper's
-quarantine flag would apply), or if Phase 1.5's HAL driver turns out to
-need it (design doc §7.2's go/no-go test will tell us), the path is:
+quarantine flag would apply), or if the HAL driver fails on a stock-SIP
+Mac (the Mac Pro's OCLP setup has passed; the Intel MacBook remains
+untested), the path is:
 enroll in the Apple Developer Program ($99/yr), get a Developer ID
 Application certificate, `codesign --sign "Developer ID Application: ..."`
 instead of the local identity, then `xcrun notarytool submit` +
@@ -174,7 +181,7 @@ To also remove the local signing identity (not necessary just to
 uninstall the app, only if you want to clean up the keychain):
 
 ```sh
-security delete-identity -c "SoundCast Local Signing" ~/Library/Keychains/login.keychain-db
+security delete-identity -c "SoundCast Local Signing" ~/Library/Keychains/soundcast-build.keychain-db
 ```
 
 ## Troubleshooting
@@ -185,10 +192,9 @@ security delete-identity -c "SoundCast Local Signing" ~/Library/Keychains/login.
   `westmereCFlags`/`westmereSwiftFlags`.
 - **No audio from a ticked device**: check Console.app for `SoundCast`
   log lines (both `ProcessTapCapture` and `LocalOutputEngine` log via
-  `NSLog` on failure) — given this code hasn't been run on real hardware
-  yet, the most likely first issue is a wrong Core Audio property
-  constant name surfacing at runtime rather than compile time; the log
-  line will say which call failed and with what `OSStatus`.
+  `NSLog` on failure). For a newly added device or path, a wrong Core
+  Audio property constant can surface at runtime rather than compile
+  time; the log line will say which call failed and with what `OSStatus`.
 - **Permission prompt never appeared / casting silently does nothing**:
   confirm `NSAudioCaptureUsageDescription` made it into the built
   `dist/SoundCast.app/Contents/Info.plist` (build.sh copies it from

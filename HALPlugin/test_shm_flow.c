@@ -1,12 +1,16 @@
 // Standalone diagnostic (not part of the SwiftPM package): proves
 // whether real audio reaches the driver's shared-memory ring buffer
-// end to end. See test_shm_flow.swift's header comment for the plan —
+// end to end. See docs/DESIGN.md section 11 for the background —
 // rewritten in C because Swift can't call shm_open (it's declared
 // variadic in the Darwin header, which Swift refuses to bridge at all,
 // even when the variadic arg is unused).
 #include <CoreAudio/AudioHardware.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>

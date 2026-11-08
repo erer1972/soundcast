@@ -1,11 +1,9 @@
 import CoreAudio
 import Foundation
 
-/// A device the user can tick in the menu bar list. Phase 1 only
-/// populates `.thisMac` and `.bluetooth`/`.other` (real Core Audio
-/// devices, enumerated below). `.airplay` and `.sonos` categories exist
-/// in the model and UI now so the grouped list layout is right from the
-/// start, but stay empty until Phase 2/3 wire up discovery.
+/// A device the user can tick in the menu bar list. Local Core Audio
+/// devices populate `.thisMac` and `.bluetooth`/`.other`; Bonjour populates
+/// `.airplay`. Sonos-specific discovery remains future work.
 public struct SoundDevice: Identifiable, Hashable {
     public enum Category: String, CaseIterable, Comparable {
         case thisMac = "This Mac"
