@@ -82,10 +82,10 @@ public final class SonosAudioStreamer: @unchecked Sendable {
         finishStop()
     }
 
-    public func disconnectClientsForTesting() -> Int {
+    public func disconnectClientsForTesting(unavailableSeconds: TimeInterval = 0) -> Int {
         lock.lock()
         defer { lock.unlock() }
-        return audioServer?.disconnectClientsForTesting() ?? 0
+        return audioServer?.disconnectClientsForTesting(unavailableSeconds: unavailableSeconds) ?? 0
     }
 
     private func beginStart() -> UUID? {
@@ -147,7 +147,7 @@ public final class SonosAudioStreamer: @unchecked Sendable {
 
     private func recover(for session: UUID) async {
         defer { finishRecovery(for: session) }
-        for delay: UInt64 in [2, 3, 5] {
+        for delay: UInt64 in [2, 3, 5, 8, 13] {
             do {
                 try await Task.sleep(nanoseconds: delay * 1_000_000_000)
                 guard isRunning(session), !Task.isCancelled else { return }
@@ -160,7 +160,13 @@ public final class SonosAudioStreamer: @unchecked Sendable {
                           isRunning(session), !Task.isCancelled else { return }
                     NSLog("[SoundCast][SonosAudioStreamer] retrying playback after media disconnect")
                     try await SonosUPnPClient.play(receiver)
-                    return
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    guard isRunning(session), !Task.isCancelled else { return }
+                    let result = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                    guard isRunning(session), !Task.isCancelled else { return }
+                    if result.currentTransportState == "PLAYING" { return }
+                    if result.currentTransportState != "STOPPED" && result.currentTransportState != "TRANSITIONING" { return }
+                    continue
                 }
                 if info.currentTransportState != "TRANSITIONING" { return }
             } catch {

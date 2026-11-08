@@ -30,7 +30,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
     private var listenerSocket: Int32 = -1
     private var running = false
     private var clients: Set<Int32> = []
-    private var interruptedAt: TimeInterval?
+    private var testUnavailableUntil: TimeInterval?
 
     public init(source: RingBuffer, sampleRate: Double, delaySeconds: Double = 0, onStreamInterrupted: (@Sendable () -> Void)? = nil) {
         self.source = source
@@ -129,7 +129,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         listenerSocket = -1
         let activeClients = Array(clients)
         clients.removeAll()
-        interruptedAt = nil
+        testUnavailableUntil = nil
         lock.unlock()
 
         if listener >= 0 {
@@ -139,9 +139,12 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         for client in activeClients { _ = Darwin.shutdown(client, SHUT_RDWR) }
     }
 
-    public func disconnectClientsForTesting() -> Int {
+    public func disconnectClientsForTesting(unavailableSeconds: TimeInterval = 0) -> Int {
         lock.lock()
         defer { lock.unlock() }
+        if unavailableSeconds.isFinite, unavailableSeconds > 0 {
+            testUnavailableUntil = ProcessInfo.processInfo.systemUptime + min(unavailableSeconds, 30)
+        }
         for client in clients { _ = Darwin.shutdown(client, SHUT_RDWR) }
         return clients.count
     }
@@ -208,8 +211,11 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             return
         }
 
-        if isReceiver { noteReceiverReconnect() }
-
+        if isReceiver && isTestUnavailable {
+            NSLog("[SoundCast][SonosHTTPAudioServer] test outage: rejecting receiver request")
+            _ = sendAll(client, Data("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 1\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
         guard sendAll(client, Data(response.utf8)), sendAll(client, Self.waveHeader(sampleRate: UInt32(sampleRate.rounded()))) else { return }
         var peak: Float = 0
         var chunks = 0
@@ -230,7 +236,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             let data = Self.pcm16(samples)
             let count = min(remaining, data.count)
             guard sendAll(client, Data(data.prefix(count))) else {
-                if chunks >= 150 && isReceiver { noteReceiverInterruption() }
+                if chunks >= 150 && isReceiver && isRunning { onStreamInterrupted?() }
                 return
             }
             remaining -= count
@@ -241,18 +247,10 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         }
     }
 
-    private func noteReceiverInterruption() {
+    private var isTestUnavailable: Bool {
         lock.lock()
-        if running { interruptedAt = ProcessInfo.processInfo.systemUptime }
-        lock.unlock()
-    }
-
-    private func noteReceiverReconnect() {
-        lock.lock()
-        let shouldRecover = running && interruptedAt.map { ProcessInfo.processInfo.systemUptime - $0 <= 5 } == true
-        interruptedAt = nil
-        lock.unlock()
-        if shouldRecover { onStreamInterrupted?() }
+        defer { lock.unlock() }
+        return testUnavailableUntil.map { ProcessInfo.processInfo.systemUptime < $0 } == true
     }
 
     private func readRequest(_ client: Int32) -> String? {

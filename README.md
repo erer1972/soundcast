@@ -141,6 +141,10 @@ These commands use the built `AirPlayDiscoverySmokeTest` executable:
 ./dist/AirPlayDiscoverySmokeTest --sonos-switch-probe "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-external-stop-probe "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-external-pause-probe "SYMFONISK Table lamp" 25
+./dist/AirPlayDiscoverySmokeTest --sonos-long-outage-probe "SYMFONISK Table lamp" 35
+./dist/AirPlayDiscoverySmokeTest --sonos-long-outage-retry-probe "SYMFONISK Table lamp" 35
+./dist/AirPlayDiscoverySmokeTest --sonos-long-outage-probe "SYMFONISK Table lamp" 55 25
+./dist/AirPlayDiscoverySmokeTest --sonos-long-outage-stop-probe "SYMFONISK Table lamp" 55 25
 ./dist/AirPlayDiscoverySmokeTest --dual-cast "kaan" "SYMFONISK Table lamp" 120 2.5
 ```
 
@@ -156,12 +160,14 @@ virtual device selected as the Mac's default output.
 
 The WAV endpoint uses a large fixed length for a live stream. A roughly
 three-minute virtual-device music test completed. On a forced connection drop,
-the SYMFONISK resumed after a SoundCast retry; explicit SoundCast stop and a
-source change were also tested. External UPnP Stop and Pause remained stopped
-or paused in silent tests on this receiver. Recovery is a heuristic: it only
-attempts a retry when the receiver reconnects within five seconds after an
-established stream disconnects. Other receiver behavior and longer outages
-may not recover automatically. The mixed AirPlay and Sonos delay is manually
+the SYMFONISK resumed after a SoundCast retry. Simulated HTTP endpoint outages
+of eight and 25 seconds also recovered automatically; these did not simulate
+physical network outages. Explicit SoundCast stop, including during pending
+outage retries, source change, and external Pause were respected in silent
+tests. Automatic recovery takes priority over an
+external Sonos Stop and can restart playback after it. Retries are bounded;
+other receiver behavior and longer outages may not recover automatically.
+The mixed AirPlay and Sonos delay is manually
 calibrated, not clock-synchronized. Longer playback, other Sonos models, and
 range requests remain unverified.
 

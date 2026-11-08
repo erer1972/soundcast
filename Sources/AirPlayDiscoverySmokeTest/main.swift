@@ -137,12 +137,14 @@ if args.first == "--capture-level" || args.first == "--capture-level-virtual" {
     }
     exit(0)
 }
-let sonosManualRetryMode = args.first == "--sonos-retry-probe"
-let sonosStopProbe = args.first == "--sonos-stop-probe"
+let sonosManualRetryMode = args.first == "--sonos-retry-probe" || args.first == "--sonos-long-outage-retry-probe"
+let sonosLongOutageStopProbe = args.first == "--sonos-long-outage-stop-probe"
+let sonosStopProbe = args.first == "--sonos-stop-probe" || sonosLongOutageStopProbe
 let sonosSwitchProbe = args.first == "--sonos-switch-probe"
 let sonosExternalStopProbe = args.first == "--sonos-external-stop-probe"
 let sonosExternalPauseProbe = args.first == "--sonos-external-pause-probe"
-let sonosSilentReconnectMode = args.first == "--sonos-reconnect-silent" || sonosStopProbe || sonosSwitchProbe || sonosExternalStopProbe || sonosExternalPauseProbe
+let sonosLongOutageProbe = args.first == "--sonos-long-outage-probe" || args.first == "--sonos-long-outage-retry-probe" || sonosLongOutageStopProbe
+let sonosSilentReconnectMode = args.first == "--sonos-reconnect-silent" || sonosStopProbe || sonosSwitchProbe || sonosExternalStopProbe || sonosExternalPauseProbe || sonosLongOutageProbe
 let sonosReconnectMode = args.first == "--sonos-reconnect" || sonosManualRetryMode || sonosSilentReconnectMode
 let sonosToneMode = args.first == "--sonos-tone" || sonosReconnectMode
 let dualCastMode = args.first == "--dual-cast"
@@ -155,8 +157,15 @@ let airplayTargetName = dualCastMode && !args.isEmpty ? args.removeFirst() : nil
 let sonosTargetName = sonosLiveMode && !args.isEmpty ? args.removeFirst() : nil
 let durationSeconds = args.first.flatMap(Double.init) ?? 8.0
 let sonosDelaySeconds = dualCastMode && args.count > 1 ? (Double(args[1]) ?? 0) : 0
-if sonosReconnectMode && (!durationSeconds.isFinite || durationSeconds < 25) {
-    print("FAIL: --sonos-reconnect requires a duration of at least 25 seconds.")
+let outageSeconds = sonosLongOutageProbe && args.count > 1 ? Int(args[1]) : 8
+if sonosLongOutageProbe && (outageSeconds == nil || !(1...30).contains(outageSeconds!)) {
+    print("FAIL: outage duration must be an integer from 1 to 30 seconds.")
+    exit(1)
+}
+let observationSeconds = sonosLongOutageProbe ? max(25, outageSeconds! + 20) : 15
+let minimumReconnectDuration = 10 + observationSeconds
+if sonosReconnectMode && (!durationSeconds.isFinite || durationSeconds < Double(minimumReconnectDuration)) {
+    print("FAIL: reconnect probes require at least \(minimumReconnectDuration) seconds.")
     exit(1)
 }
 let serverDurationSeconds = sonosWAVMode && args.count > 1
@@ -262,17 +271,17 @@ if sonosMode {
                                 throw SonosReconnectError.notPaused(info.currentTransportState, info.currentTransportStatus)
                             }
                         } else {
-                            guard info.currentTransportState == "STOPPED" else {
-                                throw SonosReconnectError.notStopped(info.currentTransportState, info.currentTransportStatus)
+                            guard info.currentTransportState == "PLAYING" else {
+                                throw SonosReconnectError.notPlaying(info.currentTransportState, info.currentTransportStatus)
                             }
                         }
                         await streamer.stop()
                         tone?.stop()
-                        print("PASS: external action was respected.")
+                        print(sonosExternalPauseProbe ? "PASS: external pause remained paused." : "PASS: external stop was automatically restarted.")
                         exit(0)
                     }
-                    let disconnected = streamer.disconnectClientsForTesting()
-                    print("Forced media disconnect for \(disconnected) client(s).")
+                    let disconnected = streamer.disconnectClientsForTesting(unavailableSeconds: sonosLongOutageProbe ? Double(outageSeconds!) : 0)
+                    print("Forced media disconnect for \(disconnected) client(s).\(sonosLongOutageProbe ? " Rejecting receiver requests for \(outageSeconds!) seconds." : "")")
                     guard disconnected > 0 else { throw SonosReconnectError.noClients }
                     if sonosSwitchProbe {
                         guard let peerIPv4 = receiver.descriptionURL.host else {
@@ -307,10 +316,10 @@ if sonosMode {
                         exit(0)
                     }
                     if sonosStopProbe {
-                        try await Task.sleep(nanoseconds: 200_000_000)
+                        try await Task.sleep(nanoseconds: sonosLongOutageStopProbe ? 10_000_000_000 : 200_000_000)
                         await streamer.stop()
                         tone?.stop()
-                        try await Task.sleep(nanoseconds: 6_000_000_000)
+                        try await Task.sleep(nanoseconds: sonosLongOutageStopProbe ? 20_000_000_000 : 6_000_000_000)
                         let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
                         print("Transport after stop: \(info.currentTransportState)/\(info.currentTransportStatus)")
                         guard info.currentTransportState == "STOPPED" else {
@@ -319,7 +328,7 @@ if sonosMode {
                         print("PASS: stopped playback did not resume.")
                         exit(0)
                     }
-                    try await Task.sleep(nanoseconds: 15_000_000_000)
+                    try await Task.sleep(nanoseconds: UInt64(observationSeconds) * 1_000_000_000)
                     let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
                     print("Transport after disconnect: \(info.currentTransportState)/\(info.currentTransportStatus)")
                     var recovered = info
@@ -333,8 +342,9 @@ if sonosMode {
                     guard recovered.currentTransportState == "PLAYING", recovered.currentTransportStatus == "OK" else {
                         throw SonosReconnectError.notPlaying(recovered.currentTransportState, recovered.currentTransportStatus)
                     }
-                    if durationSeconds > 25 {
-                        try await Task.sleep(nanoseconds: UInt64((durationSeconds - 25) * 1_000_000_000))
+                    let elapsedSeconds = 10 + Double(observationSeconds)
+                    if durationSeconds > elapsedSeconds {
+                        try await Task.sleep(nanoseconds: UInt64((durationSeconds - elapsedSeconds) * 1_000_000_000))
                     }
                 } else {
                     try await Task.sleep(nanoseconds: UInt64(durationSeconds * 1_000_000_000))
