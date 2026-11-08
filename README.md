@@ -22,7 +22,7 @@ Status: **Phase 1 + 1.5 done. Phase 2 (AirPlay 2 sender) in progress.**
   Pairing and audible playback were validated on two AppleTV6,2 receivers;
   receiver-initiated stops/restarts and multi-room sync remain unverified.
   The in-menu pairing UI still needs a manual test. Sonos S1 discovery,
-  playback control, and experimental WAV streaming are implemented in the
+  playback and master-volume control, and experimental WAV streaming are implemented in the
   backend. A CLI test played audio from the SoundCast virtual device on a
   SYMFONISK speaker; Sonos integration in the app UI remains future work.
   AirPlay-enabled Sonos receivers are not independently validated.
@@ -132,6 +132,9 @@ These commands use the built `AirPlayDiscoverySmokeTest` executable:
 ./dist/AirPlayDiscoverySmokeTest --sonos-invalid-rate
 ./dist/AirPlayDiscoverySmokeTest --sonos-server-start-probe
 ./dist/AirPlayDiscoverySmokeTest --sonos 5
+./dist/AirPlayDiscoverySmokeTest --sonos-volume-check 2
+./dist/AirPlayDiscoverySmokeTest --sonos-volume "SYMFONISK Table lamp"
+./dist/AirPlayDiscoverySmokeTest --sonos-volume "SYMFONISK Table lamp" 80
 ./dist/AirPlayDiscoverySmokeTest --sonos-wav 2 10
 ./dist/AirPlayDiscoverySmokeTest --sonos-tone "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-virtual "SYMFONISK Table lamp" 45
@@ -152,8 +155,10 @@ These commands use the built `AirPlayDiscoverySmokeTest` executable:
 ```
 
 The first two commands test invalid sample rates and listener startup locally.
-The next two only discover/query the speaker or serve silence; the others
-change its playback. The silent probes play silence and interrupt or change the
+`--sonos` only queries the speaker; `--sonos-volume-check` validates volume
+read/write without changing it. `--sonos-volume <name>` reads volume, and
+`--sonos-volume <name> <0-100>` sets and verifies it. `--sonos-wav` only serves silence;
+the other speaker probes change playback. The silent probes play silence and interrupt or change the
 selected source. Replace the names with your discovered receiver names. For
 `--sonos-virtual` and `--dual-cast`, route audio to the main
 SoundCast virtual output while the test runs. The optional final dual-cast

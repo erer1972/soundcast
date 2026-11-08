@@ -153,12 +153,15 @@ let sonosToneMode = args.first == "--sonos-tone" || sonosReconnectMode || sonosS
 let dualCastMode = args.first == "--dual-cast"
 let sonosVirtualMode = args.first == "--sonos-virtual" || dualCastMode
 let sonosLiveMode = args.first == "--sonos-live" || sonosToneMode || sonosVirtualMode
-let sonosMode = args.first == "--sonos" || args.first == "--sonos-wav" || sonosLiveMode
+let sonosVolumeCheck = args.first == "--sonos-volume-check"
+let sonosVolumeMode = args.first == "--sonos-volume"
+let sonosMode = args.first == "--sonos" || args.first == "--sonos-wav" || sonosLiveMode || sonosVolumeCheck || sonosVolumeMode
 let sonosWAVMode = args.first == "--sonos-wav"
 if sonosMode { args.removeFirst() }
 let airplayTargetName = dualCastMode && !args.isEmpty ? args.removeFirst() : nil
-let sonosTargetName = sonosLiveMode && !args.isEmpty ? args.removeFirst() : nil
-let durationSeconds = args.first.flatMap(Double.init) ?? 8.0
+let sonosTargetName = (sonosLiveMode || sonosVolumeMode) && !args.isEmpty ? args.removeFirst() : nil
+let requestedSonosVolume = sonosVolumeMode && !args.isEmpty ? Int(args[0]) : nil
+let durationSeconds = sonosVolumeMode ? 4.0 : (args.first.flatMap(Double.init) ?? 8.0)
 let sonosDelaySeconds = dualCastMode && args.count > 1 ? (Double(args[1]) ?? 0) : 0
 let startupStopDelay = sonosStartStopProbe && args.count > 1 ? Int(args[1]) : 5
 if sonosStartStopProbe && (startupStopDelay == nil || !(1...2_000).contains(startupStopDelay!)) {
@@ -193,15 +196,18 @@ if sonosMode {
     var elapsed = 0.0
     var discovered: [String: SonosReceiver] = [:]
     var transportQueries = 0
-    var liveTargetFound = false
+    var targetFound = false
     while elapsed < durationSeconds {
         try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
         elapsed += pollInterval
         for receiver in await discovery.receivers where discovered[receiver.id] == nil {
             discovered[receiver.id] = receiver
-            if sonosLiveMode && receiver.name == sonosTargetName { liveTargetFound = true }
+            if (sonosLiveMode || sonosVolumeMode) && receiver.name == sonosTargetName { targetFound = true }
             let modelText = receiver.model.map { " (\($0))" } ?? ""
             print("    - \(receiver.name)\(modelText) id=\(receiver.id) location=\(receiver.descriptionURL)")
+            if let renderingURL = receiver.renderingControlURL {
+                print("      rendering control=\(renderingURL)")
+            }
             if !sonosWAVMode {
                 do {
                     let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
@@ -210,15 +216,72 @@ if sonosMode {
                 } catch {
                     print("      GetTransportInfo failed: \(error)")
                 }
+                if receiver.renderingControlURL != nil {
+                    do {
+                        print("      master volume=\(try await SonosUPnPClient.getVolume(for: receiver))")
+                    } catch {
+                        print("      GetVolume failed: \(error)")
+                    }
+                }
             }
         }
-        if liveTargetFound { break }
+        if targetFound { break }
     }
 
     await discovery.stop()
     if discovered.isEmpty {
         print("\nFAIL: discovered zero Sonos receivers with readable UPnP descriptions.")
         exit(1)
+    }
+    if sonosVolumeCheck {
+        guard let receiver = discovered.values.sorted(by: { $0.id < $1.id }).first else { exit(1) }
+        do {
+            let volume = try await SonosUPnPClient.getVolume(for: receiver)
+            for invalid in [-1, 101] {
+                do {
+                    try await SonosUPnPClient.setVolume(invalid, for: receiver)
+                    print("FAIL: accepted invalid Sonos volume \(invalid).")
+                    exit(1)
+                } catch SonosUPnPClient.ClientError.invalidVolume {
+                }
+            }
+            try await SonosUPnPClient.setVolume(volume, for: receiver)
+            let verified = try await SonosUPnPClient.getVolume(for: receiver)
+            guard verified == volume else {
+                print("FAIL: Sonos volume changed from \(volume) to \(verified).")
+                exit(1)
+            }
+            print("PASS: Sonos volume read/write succeeded without changing its level (\(volume)).")
+        } catch {
+            print("FAIL: Sonos volume check: \(error)")
+            exit(1)
+        }
+        exit(0)
+    }
+    if sonosVolumeMode {
+        guard let sonosTargetName,
+              let receiver = discovered.values.first(where: { $0.name == sonosTargetName }) else {
+            print("FAIL: Sonos receiver \(sonosTargetName ?? "<missing name>") was not discovered.")
+            exit(1)
+        }
+        do {
+            let current = try await SonosUPnPClient.getVolume(for: receiver)
+            guard let requestedSonosVolume else {
+                print("\(receiver.name) master volume: \(current)%")
+                exit(0)
+            }
+            try await SonosUPnPClient.setVolume(requestedSonosVolume, for: receiver)
+            let actual = try await SonosUPnPClient.getVolume(for: receiver)
+            guard actual == requestedSonosVolume else {
+                print("FAIL: requested volume \(requestedSonosVolume)%, speaker reports \(actual)%.")
+                exit(1)
+            }
+            print("PASS: \(receiver.name) master volume set to \(actual)%.")
+        } catch {
+            print("FAIL: Sonos volume command: \(error)")
+            exit(1)
+        }
+        exit(0)
     }
     if sonosLiveMode {
         guard let sonosTargetName,

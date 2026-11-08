@@ -7,19 +7,22 @@ public struct SonosReceiver: Identifiable, Hashable, Sendable {
     public let model: String?
     public let descriptionURL: URL
     public let avTransportControlURL: URL?
+    public let renderingControlURL: URL?
 
     public init(
         id: String,
         name: String,
         model: String?,
         descriptionURL: URL,
-        avTransportControlURL: URL?
+        avTransportControlURL: URL?,
+        renderingControlURL: URL? = nil
     ) {
         self.id = id
         self.name = name
         self.model = model
         self.descriptionURL = descriptionURL
         self.avTransportControlURL = avTransportControlURL
+        self.renderingControlURL = renderingControlURL
     }
 }
 
@@ -124,12 +127,16 @@ public final class SonosDiscovery: ObservableObject {
         let controlURL = description.avTransportControlPath.flatMap {
             URL(string: $0, relativeTo: candidate.location)?.absoluteURL
         }
+        let renderingURL = description.renderingControlPath.flatMap {
+            URL(string: $0, relativeTo: candidate.location)?.absoluteURL
+        }
         return SonosReceiver(
             id: candidate.id,
             name: Self.displayName(friendlyName, model: model),
             model: model,
             descriptionURL: candidate.location,
-            avTransportControlURL: controlURL
+            avTransportControlURL: controlURL,
+            renderingControlURL: renderingURL
         )
     }
 
@@ -157,6 +164,7 @@ private final class SonosDeviceDescriptionParser: NSObject, XMLParserDelegate {
     private var values: [String: String] = [:]
     private var currentServiceType: String?
     private(set) var avTransportControlPath: String?
+    private(set) var renderingControlPath: String?
 
     func value(for element: String) -> String? {
         values[element]?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -199,6 +207,8 @@ private final class SonosDeviceDescriptionParser: NSObject, XMLParserDelegate {
                 currentServiceType = value
             case "controlURL" where currentServiceType?.contains(":service:AVTransport:") == true:
                 avTransportControlPath = value
+            case "controlURL" where currentServiceType?.contains(":service:RenderingControl:") == true:
+                renderingControlPath = value
             default:
                 break
             }

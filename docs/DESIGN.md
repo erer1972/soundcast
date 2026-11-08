@@ -466,12 +466,13 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
   Receiver-initiated stop or restart, multi-room sync, and manual testing of
   the in-app pairing UI remain.
 4. **Phase 3 — Sonos S1 backend groundwork in progress.** Bonjour discovery
-  via `_sonos._tcp`, UPnP description parsing, AVTransport control, and
-  experimental HTTP WAV streaming are implemented. A CLI test audibly played
+  via `_sonos._tcp`, UPnP description parsing, AVTransport and master-volume
+  control, and experimental HTTP WAV streaming are implemented. A CLI test audibly played
   music from the SoundCast virtual output on a SYMFONISK speaker, including
   a roughly three-minute session. A separate five-minute silent stream remained
-  `PLAYING/OK` at 30-second checks. The stream uses a large fixed HTTP/WAV length
-  and real-time pacing. In a forced media-disconnect test SoundCast retried
+  `PLAYING/OK` at 30-second checks. The SYMFONISK master-volume read/write path
+  was checked without changing its level. The stream uses a large fixed HTTP/WAV
+  length and real-time pacing. In a forced media-disconnect test SoundCast retried
   playback successfully, including after eight- and 25-second simulated HTTP
   endpoint outages. Silent tests verified SoundCast stop during startup,
   restarting the same streamer after cancellation or overlapping stop calls,

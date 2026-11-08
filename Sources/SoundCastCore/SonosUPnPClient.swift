@@ -8,9 +8,12 @@ public struct SonosTransportInfo: Equatable, Sendable {
 
 public enum SonosUPnPClient {
     private static let serviceType = "urn:schemas-upnp-org:service:AVTransport:1"
+    private static let renderingServiceType = "urn:schemas-upnp-org:service:RenderingControl:1"
 
     public enum ClientError: Error, CustomStringConvertible {
         case missingAVTransportService
+        case missingRenderingControlService
+        case invalidVolume(Int)
         case unexpectedHTTPStatus(Int)
         case malformedResponse
 
@@ -18,10 +21,14 @@ public enum SonosUPnPClient {
             switch self {
             case .missingAVTransportService:
                 return "Sonos description has no AVTransport control URL"
+            case .missingRenderingControlService:
+                return "Sonos description has no RenderingControl URL"
+            case .invalidVolume(let volume):
+                return "Sonos volume must be between 0 and 100 (got \(volume))"
             case .unexpectedHTTPStatus(let status):
-                return "Sonos AVTransport returned HTTP \(status)"
+                return "Sonos UPnP action returned HTTP \(status)"
             case .malformedResponse:
-                return "Sonos AVTransport response is missing required fields"
+                return "Sonos UPnP response is missing or has invalid fields"
             }
         }
     }
@@ -46,18 +53,45 @@ public enum SonosUPnPClient {
         _ = try await performAction("Pause", receiver: receiver, arguments: [("InstanceID", "0")])
     }
 
-        public static func liveWAVMetadata(uri: URL, sampleRate: UInt32, channels: UInt16 = 2, bitsPerSample: UInt16 = 16) -> String {
-                let protocolInfo = "http-get:*:audio/wav:DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=0d500000000000000000000000000000"
-                return """
-                <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dlna="urn:schemas-dlna-org:metadata-1-0/">
-                    <item id="1" parentID="0" restricted="1">
-                        <dc:title>SoundCast live audio</dc:title>
-                        <upnp:class>object.item.audioItem.audioBroadcast</upnp:class>
-                        <res protocolInfo="\(protocolInfo)" sampleFrequency="\(sampleRate)" bitsPerSample="\(bitsPerSample)" nrAudioChannels="\(channels)">\(escapeXML(uri.absoluteString))</res>
-                    </item>
-                </DIDL-Lite>
-                """
+    public static func getVolume(for receiver: SonosReceiver) async throws -> Int {
+        let data = try await performAction(
+            "GetVolume", receiver: receiver, arguments: [("InstanceID", "0"), ("Channel", "Master")], rendering: true
+        )
+        let parserDelegate = TransportInfoParser(expectedElements: ["CurrentVolume"])
+        let parser = XMLParser(data: data)
+        parser.delegate = parserDelegate
+        guard parser.parse(), let text = parserDelegate.value(for: "CurrentVolume"),
+              let volume = Int(text), (0...100).contains(volume) else {
+            throw ClientError.malformedResponse
         }
+        return volume
+    }
+
+    public static func setVolume(_ volume: Int, for receiver: SonosReceiver) async throws {
+        guard (0...100).contains(volume) else { throw ClientError.invalidVolume(volume) }
+        _ = try await performAction(
+            "SetVolume", receiver: receiver,
+            arguments: [("InstanceID", "0"), ("Channel", "Master"), ("DesiredVolume", String(volume))], rendering: true
+        )
+    }
+
+    public static func liveWAVMetadata(
+        uri: URL,
+        sampleRate: UInt32,
+        channels: UInt16 = 2,
+        bitsPerSample: UInt16 = 16
+    ) -> String {
+        let protocolInfo = "http-get:*:audio/wav:DLNA.ORG_OP=00;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=0d500000000000000000000000000000"
+        return """
+        <DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dlna="urn:schemas-dlna-org:metadata-1-0/">
+          <item id="1" parentID="0" restricted="1">
+            <dc:title>SoundCast live audio</dc:title>
+            <upnp:class>object.item.audioItem.audioBroadcast</upnp:class>
+            <res protocolInfo="\(protocolInfo)" sampleFrequency="\(sampleRate)" bitsPerSample="\(bitsPerSample)" nrAudioChannels="\(channels)">\(escapeXML(uri.absoluteString))</res>
+          </item>
+        </DIDL-Lite>
+        """
+    }
 
     /// Reads transport state only; it does not start, stop, or alter playback.
     public static func getTransportInfo(for receiver: SonosReceiver) async throws -> SonosTransportInfo {
@@ -93,11 +127,13 @@ public enum SonosUPnPClient {
         _ action: String,
         receiver: SonosReceiver,
         arguments: [(String, String)],
-        timeout: TimeInterval = 3
+        timeout: TimeInterval = 3,
+        rendering: Bool = false
     ) async throws -> Data {
-        guard let controlURL = receiver.avTransportControlURL else {
-            throw ClientError.missingAVTransportService
+        guard let controlURL = rendering ? receiver.renderingControlURL : receiver.avTransportControlURL else {
+            throw rendering ? ClientError.missingRenderingControlService : ClientError.missingAVTransportService
         }
+        let actionServiceType = rendering ? renderingServiceType : serviceType
 
         let argumentXML = arguments.map { name, value in
             "<\(name)>\(escapeXML(value))</\(name)>"
@@ -106,12 +142,12 @@ public enum SonosUPnPClient {
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
         request.setValue("text/xml; charset=\"utf-8\"", forHTTPHeaderField: "Content-Type")
-        request.setValue("\"\(serviceType)#\(action)\"", forHTTPHeaderField: "SOAPAction")
+        request.setValue("\"\(actionServiceType)#\(action)\"", forHTTPHeaderField: "SOAPAction")
         request.httpBody = Data("""
         <?xml version="1.0" encoding="utf-8"?>
         <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
           <s:Body>
-            <u:\(action) xmlns:u="\(serviceType)">\(argumentXML)</u:\(action)>
+              <u:\(action) xmlns:u="\(actionServiceType)">\(argumentXML)</u:\(action)>
           </s:Body>
         </s:Envelope>
         """.utf8)
