@@ -139,6 +139,8 @@ These commands use the built `AirPlayDiscoverySmokeTest` executable:
 ./dist/AirPlayDiscoverySmokeTest --sonos-reconnect "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-reconnect-silent "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-stop-probe "SYMFONISK Table lamp" 25
+./dist/AirPlayDiscoverySmokeTest --sonos-start-stop-probe "SYMFONISK Table lamp" 8 80
+./dist/AirPlayDiscoverySmokeTest --sonos-concurrent-stop-probe "SYMFONISK Table lamp" 8
 ./dist/AirPlayDiscoverySmokeTest --sonos-switch-probe "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-external-stop-probe "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-external-pause-probe "SYMFONISK Table lamp" 25
@@ -165,13 +167,16 @@ test stayed `PLAYING/OK` at 30-second intervals. On a forced connection drop,
 the SYMFONISK resumed after a SoundCast retry. Simulated HTTP endpoint outages
 of eight and 25 seconds also recovered automatically; these did not simulate
 physical network outages. Explicit SoundCast stop, including during pending
-outage retries, source change, and external Pause were respected in silent
-tests. Automatic recovery takes priority over an
+outage retries and during startup, source change, and external Pause were
+respected in silent tests. The same streamer also restarted cleanly after a
+startup cancellation and after overlapping stop calls. Automatic recovery takes priority over an
 external Sonos Stop and can restart playback after it. Retries are bounded;
 other receiver behavior and longer outages may not recover automatically.
 The mixed AirPlay and Sonos delay is manually
-calibrated, not clock-synchronized. Longer playback, other Sonos models, and
-range requests remain unverified.
+calibrated, not clock-synchronized. The Sonos HTTP stream allows only one
+active buffer reader, so overlapping receiver requests replace the previous
+reader. Longer playback, other Sonos models, and range requests remain
+unverified.
 
 ## Using it
 

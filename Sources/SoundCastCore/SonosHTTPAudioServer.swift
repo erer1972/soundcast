@@ -30,6 +30,8 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
     private var listenerSocket: Int32 = -1
     private var running = false
     private var clients: Set<Int32> = []
+    private var streamClient: Int32?
+    private var streamClientIsReceiver = false
     private var testUnavailableUntil: TimeInterval?
 
     public init(source: RingBuffer, sampleRate: Double, delaySeconds: Double = 0, onStreamInterrupted: (@Sendable () -> Void)? = nil) {
@@ -127,8 +129,10 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         running = false
         let listener = listenerSocket
         listenerSocket = -1
-        let activeClients = Array(clients)
+        for client in clients { _ = Darwin.shutdown(client, SHUT_RDWR) }
         clients.removeAll()
+        streamClient = nil
+        streamClientIsReceiver = false
         testUnavailableUntil = nil
         lock.unlock()
 
@@ -136,7 +140,6 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             _ = Darwin.shutdown(listener, SHUT_RDWR)
             Darwin.close(listener)
         }
-        for client in activeClients { _ = Darwin.shutdown(client, SHUT_RDWR) }
     }
 
     public func disconnectClientsForTesting(unavailableSeconds: TimeInterval = 0) -> Int {
@@ -192,6 +195,10 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         defer {
             lock.lock()
             clients.remove(client)
+            if streamClient == client {
+                streamClient = nil
+                streamClientIsReceiver = false
+            }
             lock.unlock()
             Darwin.close(client)
         }
@@ -216,6 +223,10 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             _ = sendAll(client, Data("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 1\r\nConnection: close\r\n\r\n".utf8))
             return
         }
+        guard claimStream(client, isReceiver: isReceiver) else {
+            _ = sendAll(client, Data("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
         guard sendAll(client, Data(response.utf8)), sendAll(client, Self.waveHeader(sampleRate: UInt32(sampleRate.rounded()))) else { return }
         var peak: Float = 0
         var chunks = 0
@@ -227,11 +238,10 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             var samples = [Float](repeating: 0, count: Self.chunkFrames * 2)
             let silent = min(silentFrames, Self.chunkFrames)
             silentFrames -= silent
-            if silent < Self.chunkFrames {
-                samples.withUnsafeMutableBufferPointer {
-                    source.read(into: $0.baseAddress!.advanced(by: silent * 2), count: $0.count - silent * 2)
-                }
+            let isCurrent = samples.withUnsafeMutableBufferPointer {
+                readStream(client, into: $0.baseAddress!.advanced(by: silent * 2), count: $0.count - silent * 2)
             }
+            guard isCurrent else { return }
             for sample in samples where sample.isFinite { peak = max(peak, abs(sample)) }
             let data = Self.pcm16(samples)
             let count = min(remaining, data.count)
@@ -245,6 +255,24 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             let delay = nextDeadline - ProcessInfo.processInfo.systemUptime
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         }
+    }
+
+    private func claimStream(_ client: Int32, isReceiver: Bool) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard running, isReceiver || !streamClientIsReceiver else { return false }
+        if let previous = streamClient, previous != client { _ = Darwin.shutdown(previous, SHUT_RDWR) }
+        streamClient = client
+        streamClientIsReceiver = isReceiver
+        return true
+    }
+
+    private func readStream(_ client: Int32, into output: UnsafeMutablePointer<Float>, count: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard running, streamClient == client else { return false }
+        if count > 0 { source.read(into: output, count: count) }
+        return true
     }
 
     private var isTestUnavailable: Bool {

@@ -473,14 +473,16 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
   `PLAYING/OK` at 30-second checks. The stream uses a large fixed HTTP/WAV length
   and real-time pacing. In a forced media-disconnect test SoundCast retried
   playback successfully, including after eight- and 25-second simulated HTTP
-  endpoint outages. Silent tests verified SoundCast stop during pending outage
-  retries, source change, and external Pause handling. Automatic recovery takes
+  endpoint outages. Silent tests verified SoundCast stop during startup,
+  restarting the same streamer after cancellation or overlapping stop calls,
+  stop during pending outage retries, source change, and external Pause handling. Automatic recovery takes
   priority over an external Sonos Stop
   and can restart playback after it. Retries are bounded; physical network
   outages and other receiver behavior remain unverified, and longer outages
   may not recover automatically.
   Mixed AirPlay and Sonos output can use a manually calibrated delay, but is
-  not clock-synchronized. Longer playback, range requests, and other receivers
+  not clock-synchronized. Only one Sonos HTTP request consumes its ring at a
+  time; a new receiver request replaces the previous reader. Longer playback, range requests, and other receivers
   remain unverified. Sonos UI integration is not implemented, and AirPlay-enabled
   Sonos devices are not independently validated.
 

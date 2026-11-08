@@ -147,7 +147,9 @@ let sonosLongOutageProbe = args.first == "--sonos-long-outage-probe" || args.fir
 let sonosSilentReconnectMode = args.first == "--sonos-reconnect-silent" || sonosStopProbe || sonosSwitchProbe || sonosExternalStopProbe || sonosExternalPauseProbe || sonosLongOutageProbe
 let sonosReconnectMode = args.first == "--sonos-reconnect" || sonosManualRetryMode || sonosSilentReconnectMode
 let sonosSustainProbe = args.first == "--sonos-sustain-silent"
-let sonosToneMode = args.first == "--sonos-tone" || sonosReconnectMode || sonosSustainProbe
+let sonosStartStopProbe = args.first == "--sonos-start-stop-probe"
+let sonosConcurrentStopProbe = args.first == "--sonos-concurrent-stop-probe"
+let sonosToneMode = args.first == "--sonos-tone" || sonosReconnectMode || sonosSustainProbe || sonosStartStopProbe || sonosConcurrentStopProbe
 let dualCastMode = args.first == "--dual-cast"
 let sonosVirtualMode = args.first == "--sonos-virtual" || dualCastMode
 let sonosLiveMode = args.first == "--sonos-live" || sonosToneMode || sonosVirtualMode
@@ -158,6 +160,11 @@ let airplayTargetName = dualCastMode && !args.isEmpty ? args.removeFirst() : nil
 let sonosTargetName = sonosLiveMode && !args.isEmpty ? args.removeFirst() : nil
 let durationSeconds = args.first.flatMap(Double.init) ?? 8.0
 let sonosDelaySeconds = dualCastMode && args.count > 1 ? (Double(args[1]) ?? 0) : 0
+let startupStopDelay = sonosStartStopProbe && args.count > 1 ? Int(args[1]) : 5
+if sonosStartStopProbe && (startupStopDelay == nil || !(1...2_000).contains(startupStopDelay!)) {
+    print("FAIL: startup-stop delay must be an integer from 1 to 2000 milliseconds.")
+    exit(1)
+}
 let outageSeconds = sonosLongOutageProbe && args.count > 1 ? Int(args[1]) : 8
 if sonosLongOutageProbe && (outageSeconds == nil || !(1...30).contains(outageSeconds!)) {
     print("FAIL: outage duration must be an integer from 1 to 30 seconds.")
@@ -228,7 +235,7 @@ if sonosMode {
         } else {
             capture = ProcessTapCapture(ringBuffer: captureBuffer)
         }
-        let tone = sonosToneMode ? SonosTestTone(buffer: captureBuffer, amplitude: sonosSilentReconnectMode || sonosSustainProbe ? 0 : 0.1) : nil
+        let tone = sonosToneMode ? SonosTestTone(buffer: captureBuffer, amplitude: sonosSilentReconnectMode || sonosSustainProbe || sonosStartStopProbe || sonosConcurrentStopProbe ? 0 : 0.1) : nil
         var airplaySender: AirPlayRealtimeSender?
         var airplayClock: AirPlayPTPClock?
         do {
@@ -256,6 +263,56 @@ if sonosMode {
                 delaySeconds: sonosDelaySeconds
             )
             do {
+                if sonosConcurrentStopProbe {
+                    try await streamer.start()
+                    let firstStop = Task { await streamer.stop() }
+                    try await Task.sleep(nanoseconds: 5_000_000)
+                    await streamer.stop()
+                    do {
+                        try await streamer.start()
+                    } catch {
+                        await firstStop.value
+                        throw error
+                    }
+                    await firstStop.value
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                    print("Transport after concurrent stops and restart: \(info.currentTransportState)/\(info.currentTransportStatus)")
+                    guard info.currentTransportState == "PLAYING", info.currentTransportStatus == "OK" else {
+                        throw SonosReconnectError.notPlaying(info.currentTransportState, info.currentTransportStatus)
+                    }
+                    await streamer.stop()
+                    tone?.stop()
+                    print("PASS: concurrent stops completed before restart.")
+                    exit(0)
+                }
+                if sonosStartStopProbe {
+                    let startTask = Task { try await streamer.start() }
+                    try await Task.sleep(nanoseconds: UInt64(startupStopDelay!) * 1_000_000)
+                    await streamer.stop()
+                    do { try await startTask.value } catch { print("Startup ended: \(error)") }
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                    print("Transport after stop during startup: \(info.currentTransportState)/\(info.currentTransportStatus)")
+                    guard info.currentTransportState == "STOPPED" else {
+                        throw SonosReconnectError.notStopped(info.currentTransportState, info.currentTransportStatus)
+                    }
+                    try await streamer.start()
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    let restarted = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                    print("Transport after restarting the same streamer: \(restarted.currentTransportState)/\(restarted.currentTransportStatus)")
+                    guard restarted.currentTransportState == "PLAYING", restarted.currentTransportStatus == "OK" else {
+                        throw SonosReconnectError.notPlaying(restarted.currentTransportState, restarted.currentTransportStatus)
+                    }
+                    await streamer.stop()
+                    tone?.stop()
+                    let stopped = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                    guard stopped.currentTransportState == "STOPPED" else {
+                        throw SonosReconnectError.notStopped(stopped.currentTransportState, stopped.currentTransportStatus)
+                    }
+                    print("PASS: startup stop, restart, and final stop completed.")
+                    exit(0)
+                }
                 try await streamer.start()
                 print("Sonos stream started for \(durationSeconds)s. \(sonosSilentReconnectMode || sonosSustainProbe ? "Playing silence." : sonosToneMode ? "Playing test tone." : "Now open the audio source on this Mac.")")
                 if sonosSustainProbe {
