@@ -843,6 +843,13 @@ isn't repeated:
     then `completeSetup`. On success the room starts if it's ticked
     under a running source. Sonos speakers may need transient pairing
     (no PIN) instead; that's untested.
+  - **Reconnect retry (2026-11-08, forced-drop test on the Mac Pro).**
+    Launched the app to `kaan` with
+    `SOUNDCAST_DEBUG_DROP_SESSION_AFTER=15` and no media playback. Unified
+    logs showed eight successful TCP connections to RTSP port 7000 in one
+    app process: the initial session plus seven re-establishments, about
+    17 seconds apart. This verifies retry after a simulated session loss;
+    a real receiver restart, sleep, or remote-stop is still untested.
   - Still open:
     - multi-receiver sync quality (shared clock, but untested with two
       rooms);
