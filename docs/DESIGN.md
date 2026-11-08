@@ -469,7 +469,8 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
   via `_sonos._tcp`, UPnP description parsing, AVTransport control, and
   experimental HTTP WAV streaming are implemented. A CLI test audibly played
   music from the SoundCast virtual output on a SYMFONISK speaker, including
-  a roughly three-minute session. The stream uses a large fixed HTTP/WAV length
+  a roughly three-minute session. A separate five-minute silent stream remained
+  `PLAYING/OK` at 30-second checks. The stream uses a large fixed HTTP/WAV length
   and real-time pacing. In a forced media-disconnect test SoundCast retried
   playback successfully, including after eight- and 25-second simulated HTTP
   endpoint outages. Silent tests verified SoundCast stop during pending outage

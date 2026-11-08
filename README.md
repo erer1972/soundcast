@@ -135,6 +135,7 @@ These commands use the built `AirPlayDiscoverySmokeTest` executable:
 ./dist/AirPlayDiscoverySmokeTest --sonos-wav 2 10
 ./dist/AirPlayDiscoverySmokeTest --sonos-tone "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-virtual "SYMFONISK Table lamp" 45
+./dist/AirPlayDiscoverySmokeTest --sonos-sustain-silent "SYMFONISK Table lamp" 300
 ./dist/AirPlayDiscoverySmokeTest --sonos-reconnect "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-reconnect-silent "SYMFONISK Table lamp" 25
 ./dist/AirPlayDiscoverySmokeTest --sonos-stop-probe "SYMFONISK Table lamp" 25
@@ -159,7 +160,8 @@ available as `--sonos-live`, but was silent in the most recent test with the
 virtual device selected as the Mac's default output.
 
 The WAV endpoint uses a large fixed length for a live stream. A roughly
-three-minute virtual-device music test completed. On a forced connection drop,
+three-minute virtual-device music test completed; a separate five-minute silent
+test stayed `PLAYING/OK` at 30-second intervals. On a forced connection drop,
 the SYMFONISK resumed after a SoundCast retry. Simulated HTTP endpoint outages
 of eight and 25 seconds also recovered automatically; these did not simulate
 physical network outages. Explicit SoundCast stop, including during pending

@@ -146,7 +146,8 @@ let sonosExternalPauseProbe = args.first == "--sonos-external-pause-probe"
 let sonosLongOutageProbe = args.first == "--sonos-long-outage-probe" || args.first == "--sonos-long-outage-retry-probe" || sonosLongOutageStopProbe
 let sonosSilentReconnectMode = args.first == "--sonos-reconnect-silent" || sonosStopProbe || sonosSwitchProbe || sonosExternalStopProbe || sonosExternalPauseProbe || sonosLongOutageProbe
 let sonosReconnectMode = args.first == "--sonos-reconnect" || sonosManualRetryMode || sonosSilentReconnectMode
-let sonosToneMode = args.first == "--sonos-tone" || sonosReconnectMode
+let sonosSustainProbe = args.first == "--sonos-sustain-silent"
+let sonosToneMode = args.first == "--sonos-tone" || sonosReconnectMode || sonosSustainProbe
 let dualCastMode = args.first == "--dual-cast"
 let sonosVirtualMode = args.first == "--sonos-virtual" || dualCastMode
 let sonosLiveMode = args.first == "--sonos-live" || sonosToneMode || sonosVirtualMode
@@ -166,6 +167,10 @@ let observationSeconds = sonosLongOutageProbe ? max(25, outageSeconds! + 20) : 1
 let minimumReconnectDuration = 10 + observationSeconds
 if sonosReconnectMode && (!durationSeconds.isFinite || durationSeconds < Double(minimumReconnectDuration)) {
     print("FAIL: reconnect probes require at least \(minimumReconnectDuration) seconds.")
+    exit(1)
+}
+if sonosSustainProbe && (!durationSeconds.isFinite || durationSeconds < 30) {
+    print("FAIL: --sonos-sustain-silent requires at least 30 seconds.")
     exit(1)
 }
 let serverDurationSeconds = sonosWAVMode && args.count > 1
@@ -223,7 +228,7 @@ if sonosMode {
         } else {
             capture = ProcessTapCapture(ringBuffer: captureBuffer)
         }
-        let tone = sonosToneMode ? SonosTestTone(buffer: captureBuffer, amplitude: sonosSilentReconnectMode ? 0 : 0.1) : nil
+        let tone = sonosToneMode ? SonosTestTone(buffer: captureBuffer, amplitude: sonosSilentReconnectMode || sonosSustainProbe ? 0 : 0.1) : nil
         var airplaySender: AirPlayRealtimeSender?
         var airplayClock: AirPlayPTPClock?
         do {
@@ -252,8 +257,20 @@ if sonosMode {
             )
             do {
                 try await streamer.start()
-                print("Sonos stream started for \(durationSeconds)s. \(sonosSilentReconnectMode ? "Playing silence." : sonosToneMode ? "Playing test tone." : "Now open the audio source on this Mac.")")
-                if sonosReconnectMode {
+                print("Sonos stream started for \(durationSeconds)s. \(sonosSilentReconnectMode || sonosSustainProbe ? "Playing silence." : sonosToneMode ? "Playing test tone." : "Now open the audio source on this Mac.")")
+                if sonosSustainProbe {
+                    var remaining = durationSeconds
+                    while remaining > 0 {
+                        let interval = min(30, remaining)
+                        try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                        remaining -= interval
+                        let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                        print("Transport at \(durationSeconds - remaining)s: \(info.currentTransportState)/\(info.currentTransportStatus)")
+                        guard info.currentTransportState == "PLAYING", info.currentTransportStatus == "OK" else {
+                            throw SonosReconnectError.notPlaying(info.currentTransportState, info.currentTransportStatus)
+                        }
+                    }
+                } else if sonosReconnectMode {
                     try await Task.sleep(nanoseconds: 10_000_000_000)
                     if sonosExternalStopProbe || sonosExternalPauseProbe {
                         if sonosExternalPauseProbe {
