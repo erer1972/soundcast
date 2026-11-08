@@ -108,6 +108,7 @@ final class AppState: ObservableObject {
     // are handled by AirPlayRealtimeSender. Sonos-specific output remains
     // unimplemented.
     private let airPlayDiscovery = AirPlayDiscovery()
+    private let sonosDiscovery = SonosDiscovery()
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
@@ -126,7 +127,20 @@ final class AppState: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+        sonosDiscovery.$receivers
+            .sink { [weak self] receivers in
+                self?.sonosDevices = receivers.map { receiver in
+                    SoundDevice(
+                        id: "sonos:\(receiver.id)",
+                        name: receiver.name,
+                        category: .sonos,
+                        audioObjectID: nil
+                    )
+                }
+            }
+            .store(in: &cancellables)
         airPlayDiscovery.start()
+        sonosDiscovery.start()
         setUpLaunchArgumentCasting()
     }
 

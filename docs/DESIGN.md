@@ -465,9 +465,12 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
   app playback has now been confirmed on a second receiver as well.
   Receiver-initiated stop or restart, multi-room sync, and manual testing of
   the in-app pairing UI remain.
-4. **Phase 3 — not started.** Sonos S1/UPnP and multi-room synchronization
-  remain planned; AirPlay-enabled Sonos devices are discovered but not
-  independently validated.
+4. **Phase 3 — Sonos S1 backend groundwork in progress.** Bonjour discovery
+  via `_sonos._tcp`, UPnP description parsing, and read-only AVTransport
+  `GetTransportInfo` are implemented and verified on a real receiver
+  (`STOPPED/OK/1`). HTTP audio streaming, playback control, and UI integration
+  remain unimplemented; AirPlay-enabled Sonos devices are not independently
+  validated.
 
 ## 11. Phase 1.5 status and findings (2026-11-06)
 

@@ -21,8 +21,9 @@ Status: **Phase 1 + 1.5 done. Phase 2 (AirPlay 2 sender) in progress.**
   streaming, and retry after a simulated session drop are implemented.
   Pairing and audible playback were validated on two AppleTV6,2 receivers;
   receiver-initiated stops/restarts and multi-room sync remain unverified.
-  The in-menu pairing UI still needs a manual test. Sonos-specific S1/UPnP
-  support is planned for Phase 3; AirPlay-enabled Sonos receivers are not
+  The in-menu pairing UI still needs a manual test. Sonos S1 discovery and
+  read-only transport status are implemented; HTTP audio streaming and UI
+  integration remain future work. AirPlay-enabled Sonos receivers are not
   independently validated.
 
 See `docs/DESIGN.md` for the full architecture, the research behind the

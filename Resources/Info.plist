@@ -29,6 +29,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_airplay._tcp</string>
+		<string>_sonos._tcp</string>
 	</array>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>

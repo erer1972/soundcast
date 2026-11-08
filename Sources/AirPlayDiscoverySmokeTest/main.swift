@@ -1,24 +1,62 @@
 import Foundation
 import SoundCastCore
 
-// Design doc §12 Phase 2 step 1 smoke test: Bonjour discovery only — no
-// pairing or connection yet. Prints every _airplay._tcp receiver found,
-// with real TXT-derived fields, as direct evidence discovery works
-// end-to-end on real hardware — not just "no exception was thrown".
+// Bonjour discovery smoke test for AirPlay receivers, or Sonos UPnP
+// descriptions with --sonos. No audio is played.
 //
-// Usage: AirPlayDiscoverySmokeTest [<seconds, default 8>]
+// Usage: AirPlayDiscoverySmokeTest [--sonos] [<seconds, default 8>]
 
 CPUFeatureGuard.logAndGuard(context: "AirPlayDiscoverySmokeTest launch")
 
-let args = Array(CommandLine.arguments.dropFirst())
+var args = Array(CommandLine.arguments.dropFirst())
+let discoverSonos = args.first == "--sonos"
+if discoverSonos { args.removeFirst() }
 let durationSeconds = args.first.flatMap(Double.init) ?? 8.0
+
+let pollInterval = 0.5
+if discoverSonos {
+    let discovery = SonosDiscovery()
+    await discovery.start()
+    print("Browsing _sonos._tcp and fetching device descriptions for \(durationSeconds)s...")
+
+    var elapsed = 0.0
+    var discovered: [String: SonosReceiver] = [:]
+    var transportQueries = 0
+    while elapsed < durationSeconds {
+        try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+        elapsed += pollInterval
+        for receiver in await discovery.receivers where discovered[receiver.id] == nil {
+            discovered[receiver.id] = receiver
+            let modelText = receiver.model.map { " (\($0))" } ?? ""
+            print("    - \(receiver.name)\(modelText) id=\(receiver.id) location=\(receiver.descriptionURL)")
+            do {
+                let info = try await SonosUPnPClient.getTransportInfo(for: receiver)
+                transportQueries += 1
+                print("      transport state=\(info.currentTransportState) status=\(info.currentTransportStatus) speed=\(info.currentSpeed)")
+            } catch {
+                print("      GetTransportInfo failed: \(error)")
+            }
+        }
+    }
+
+    await discovery.stop()
+    if discovered.isEmpty {
+        print("\nFAIL: discovered zero Sonos receivers with readable UPnP descriptions.")
+        exit(1)
+    }
+    guard transportQueries > 0 else {
+        print("\nFAIL: discovered Sonos receivers but GetTransportInfo succeeded for none.")
+        exit(1)
+    }
+    print("\nPASS: discovered \(discovered.count) Sonos receiver(s); GetTransportInfo succeeded for \(transportQueries).")
+    exit(0)
+}
 
 let discovery = AirPlayDiscovery()
 await discovery.start()
 print("Browsing _airplay._tcp for \(durationSeconds)s...")
 
 var elapsed = 0.0
-let pollInterval = 0.5
 var lastCount = -1
 while elapsed < durationSeconds {
     try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
@@ -26,11 +64,11 @@ while elapsed < durationSeconds {
     let found = await discovery.receivers
     if found.count != lastCount {
         lastCount = found.count
-        print("  [t=\(String(format: "%.1f", elapsed))s] \(found.count) receiver(s):")
-        for r in found {
-            let badge = r.supportsAirPlay2 ? "AirPlay2" : "AirPlay1"
-            let modelText = r.model.map { " (\($0))" } ?? ""
-            print("    - \(r.name)\(modelText) [\(badge)] id=\(r.id)")
+        print("  [t=\(elapsed)s] \(found.count) receiver(s):")
+        for receiver in found {
+            let badge = receiver.supportsAirPlay2 ? "AirPlay2" : "AirPlay1"
+            let modelText = receiver.model.map { " (\($0))" } ?? ""
+            print("    - \(receiver.name)\(modelText) [\(badge)] id=\(receiver.id)")
         }
     }
 }
