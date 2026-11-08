@@ -131,20 +131,33 @@ final class AppState: ObservableObject {
     }
 
     /// Test hook for driving the app headless (e.g. over ssh):
-    /// `open SoundCast.app --args --cast-airplay kaan` turns on "Cast
-    /// Everything" and ticks that AirPlay room as soon as Bonjour finds it.
+    /// Repeated `--cast-airplay <name>` arguments turn on "Cast Everything"
+    /// and tick those rooms once Bonjour has found all of them.
     private func setUpLaunchArgumentCasting() {
         let arguments = CommandLine.arguments
-        guard let flag = arguments.firstIndex(of: "--cast-airplay"), flag + 1 < arguments.count else { return }
-        let roomName = arguments[flag + 1]
-        NSLog("[SoundCast][AppState] --cast-airplay: waiting for \"\(roomName)\"")
+        var roomNames = Set<String>()
+        var index = 0
+        while index + 1 < arguments.count {
+            if arguments[index] == "--cast-airplay" {
+                roomNames.insert(arguments[index + 1])
+                index += 2
+            } else {
+                index += 1
+            }
+        }
+        guard !roomNames.isEmpty else { return }
+        let roomNameList = roomNames.sorted().joined(separator: ", ")
+        NSLog("[SoundCast][AppState] --cast-airplay: waiting for \"\(roomNameList)\"")
         $airplayDevices
-            .compactMap { $0.first { $0.name == roomName } }
+            .compactMap { devices -> [SoundDevice]? in
+                let matching = devices.filter { roomNames.contains($0.name) }
+                return Set(matching.map(\.name)) == roomNames ? matching : nil
+            }
             .first()
-            .sink { [weak self] device in
+            .sink { [weak self] devices in
                 guard let self else { return }
-                NSLog("[SoundCast][AppState] --cast-airplay: casting everything to \"\(roomName)\"")
-                if self.selectedDeviceIDsBySource[.globalTap]?.contains(device.id) != true {
+                NSLog("[SoundCast][AppState] --cast-airplay: casting everything to \"\(roomNameList)\"")
+                for device in devices where self.selectedDeviceIDsBySource[.globalTap]?.contains(device.id) != true {
                     self.toggleDevice(device, for: .globalTap)
                 }
                 self.setActive(.globalTap, on: true)

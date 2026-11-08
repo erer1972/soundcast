@@ -817,8 +817,15 @@ isn't repeated:
     Pair-setup completed through the CLI smoke test; pair-verify then
     established an encrypted session and `GET /info` returned 200. The
     production app connected over RTSP, initialized ALAC, and streamed an
-    audio source that was confirmed audible. The in-menu pairing UI and
-    simultaneous playback to multiple receivers remain untested.
+    audio source that was confirmed audible. The in-menu pairing UI remains
+    untested; acoustic sync across multiple receivers remains open.
+  - **Two-receiver stream check (2026-11-08).** The headless launch hook
+    now accepts repeated `--cast-airplay <name>` arguments. One production
+    app process opened RTSP sessions and ALAC encoders for both receivers.
+    During a short audio run, an IPv6 UDP capture showed 610 audio-sized
+    packets to one receiver and 611 to the other. The listener confirmed
+    playback in one room but couldn't compare both rooms; acoustic sync
+    remains unverified.
   - Still open:
     - multi-receiver sync quality (shared clock, but untested with two
       rooms);
