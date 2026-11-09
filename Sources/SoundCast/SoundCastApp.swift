@@ -81,6 +81,7 @@ struct SoundCastApp: App {
         }
         CPUFeatureGuard.logAndGuard(context: "app launch")
         let appState = AppState()
+        appState.startWebControl()
         AppDelegate.appState = appState
         _state = StateObject(wrappedValue: appState)
         _panel = StateObject(wrappedValue: FloatingPanelController(state: appState))

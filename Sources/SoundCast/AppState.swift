@@ -446,6 +446,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Extra delay (ms, may be negative) added to the latency reported to
+    /// video players only, to fine-tune lip sync by eye.
+    @Published private(set) var videoSyncMilliseconds: Double =
+        UserDefaults.standard.double(forKey: "VideoSyncMilliseconds")
+
+    func setVideoSync(milliseconds: Double) {
+        let value = max(-500, min(500, milliseconds.rounded()))
+        guard value != videoSyncMilliseconds else { return }
+        videoSyncMilliseconds = value
+        UserDefaults.standard.set(value, forKey: "VideoSyncMilliseconds")
+        for source in Self.allSources where isActive(source) {
+            guard let session = runningSessions[source] else { continue }
+            publishLatency(for: source, outputEngine: session.output, selected: selectedDeviceIDsBySource[source] ?? [])
+        }
+    }
+
+    /// Web control page (see WebControl.swift); address shown in the menu.
+    var webControl: WebControlServer?
+    @Published var webControlAddress: String?
+
     @Published private(set) var calibrationStatus: String?
     @Published private(set) var isCalibrating = false
 
@@ -758,6 +778,7 @@ final class AppState: ObservableObject {
         if selected.contains(where: { $0.hasPrefix("airplay:") }) {
             latency = max(latency, AirPlayRealtimeSender.playbackLatencySeconds + max(0, syncOffsetMilliseconds / 1000))
         }
+        latency = max(0, latency + videoSyncMilliseconds / 1000)
         capture.setReportedLatency(seconds: latency)
         NSLog("[SoundCast][AppState] reporting \(String(format: "%.3f", latency)) s latency on \(source.displayName)")
     }

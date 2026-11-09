@@ -49,6 +49,29 @@ struct MenuBarContentView: View {
             }
             .help("Delays this Mac's speakers (including Bluetooth) relative to AirPlay rooms. Increase if they play ahead of the Apple TVs, decrease if behind.")
 
+            HStack {
+                Text("Video Sync")
+                Slider(
+                    value: Binding(
+                        get: { state.videoSyncMilliseconds },
+                        set: { state.setVideoSync(milliseconds: $0) }
+                    ),
+                    in: -500...500,
+                    step: 10
+                )
+                Text(String(format: "%+.0f ms", state.videoSyncMilliseconds))
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 58, alignment: .trailing)
+                Button {
+                    state.setVideoSync(milliseconds: 0)
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                }
+                .buttonStyle(.plain)
+                .help("Reset to 0 ms")
+            }
+            .help("Lip sync for video in Safari, Chrome and other players. If the voice comes after the lips, move right; if before, move left. Pause and play the video after changing it.")
+
             HStack(alignment: .firstTextBaseline) {
                 Button(state.isCalibrating ? "Calibrating…" : "Calibrate Sync") {
                     state.calibrateSync()
@@ -101,6 +124,15 @@ struct MenuBarContentView: View {
                 get: { state.launchAtLoginEnabled },
                 set: { state.setLaunchAtLogin($0) }
             ))
+
+            if let address = state.webControlAddress, let url = URL(string: address) {
+                HStack(spacing: 4) {
+                    Text("Web control:")
+                    Link(address.replacingOccurrences(of: "http://", with: ""), destination: url)
+                }
+                .font(.caption)
+                .help("Open this address on a phone or tablet on your home network to control SoundCast.")
+            }
 
             Button("Refresh Devices") {
                 state.refreshDeviceList()
