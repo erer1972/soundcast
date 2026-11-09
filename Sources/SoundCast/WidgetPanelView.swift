@@ -24,7 +24,12 @@ struct WidgetPanelView: View {
             width: controller.isExpanded ? FloatingPanelController.expandedSize.width : FloatingPanelController.compactSize.width,
             height: controller.isExpanded ? FloatingPanelController.expandedSize.height : FloatingPanelController.compactSize.height
         )
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background {
+            // Lower opacity lets more of the desktop through the blur.
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .opacity(1 - state.transparency * 0.75)
+        }
         .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(.white.opacity(0.14)))
         .preferredColorScheme(.dark)
         .tint(accent)
@@ -120,7 +125,7 @@ struct WidgetPanelView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(state.activeDevices.prefix(3)) { device in
-                            DeviceLine(device: device, active: state.isCasting)
+                            DeviceLine(device: device, level: state.isCasting ? state.level(for: device) : 0)
                         }
                         if state.activeDevices.count > 3 {
                             Text("+\(state.activeDevices.count - 3) more")
@@ -233,7 +238,7 @@ private struct SectionLabel: View {
 
 private struct DeviceLine: View {
     let device: SoundDevice
-    let active: Bool
+    let level: Float
 
     var body: some View {
         HStack {
@@ -242,28 +247,32 @@ private struct DeviceLine: View {
                 Text(device.category.rawValue).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
-            EqBars(active: active)
+            EqBars(level: level)
         }
     }
 }
 
-/// Five small level bars: moving while casting, flat and grey when paused
-/// (and static when Reduce Motion is on).
+/// Five small level bars driven by the real audio level: they move with
+/// the sound, and sit flat and grey when paused or silent (static height
+/// per level when Reduce Motion is on).
 private struct EqBars: View {
-    let active: Bool
+    let level: Float
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private var playing: Bool { level > 0.01 }
+
     var body: some View {
-        TimelineView(.animation(minimumInterval: 0.12, paused: !active || reduceMotion)) { context in
+        TimelineView(.animation(minimumInterval: 0.08, paused: !playing || reduceMotion)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
+            // Perceptual-ish scaling so quiet passages still move the bars.
+            let loudness = Double(min(1, sqrt(level) * 1.2))
             HStack(alignment: .bottom, spacing: 3) {
                 ForEach(0..<5, id: \.self) { i in
-                    let level: Double = active
-                        ? (reduceMotion ? 0.7 : 0.25 + 0.75 * abs(sin(t * 2.4 + Double(i) * 1.3)))
-                        : 0.25
+                    let wobble = reduceMotion ? 0.8 : 0.55 + 0.45 * abs(sin(t * 5.3 + Double(i) * 1.7))
+                    let height: Double = playing ? 0.15 + 0.85 * loudness * wobble : 0.15
                     RoundedRectangle(cornerRadius: 2)
-                        .fill(active ? Color(red: 0.43, green: 0.91, blue: 0.78) : Color.white.opacity(0.25))
-                        .frame(width: 4, height: 22 * level)
+                        .fill(playing ? Color(red: 0.43, green: 0.91, blue: 0.78) : Color.white.opacity(0.25))
+                        .frame(width: 4, height: 22 * height)
                 }
             }
             .frame(height: 22, alignment: .bottom)

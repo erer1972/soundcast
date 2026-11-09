@@ -26,9 +26,32 @@ struct MenuBarContentView: View {
                 )
             }
 
+            HStack {
+                Text("AirPlay Sync")
+                Slider(
+                    value: Binding(
+                        get: { state.syncOffsetMilliseconds },
+                        set: { state.setSyncOffset(milliseconds: $0) }
+                    ),
+                    in: -500...500,
+                    step: 10
+                )
+                Text(String(format: "%+.0f ms", state.syncOffsetMilliseconds))
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 58, alignment: .trailing)
+                Button {
+                    state.setSyncOffset(milliseconds: 0)
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                }
+                .buttonStyle(.plain)
+                .help("Reset to 0 ms")
+            }
+            .help("Delays this Mac's speakers (including Bluetooth) relative to AirPlay rooms. Increase if they play ahead of the Apple TVs, decrease if behind.")
+
             Divider()
 
-            Text("\"Cast Everything\" sends all Mac audio; \"SoundCast\" sends only apps whose output is set to the SoundCast device.")
+            Text("One source at a time: \"Cast Everything\" sends all Mac audio; \"SoundCast\" sends what plays to the SoundCast output (turning it on selects that output for you).")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
@@ -47,6 +70,11 @@ struct MenuBarContentView: View {
             }
             .frame(height: min(max(sourceListHeight, 1), maxSourceListHeight))
             .onPreferenceChange(SourceListHeightKey.self) { sourceListHeight = $0 }
+
+            HStack {
+                Text("Transparency")
+                Slider(value: $state.transparency, in: 0...1)
+            }
 
             Divider()
 
@@ -72,6 +100,15 @@ struct MenuBarContentView: View {
         }
         .padding(12)
         .frame(width: 300)
+        .background {
+            // Our own blur (same as the widget) replaces the system one,
+            // which MenuWindowTransparency neutralises.
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .opacity(1 - state.transparency * 0.75)
+                .ignoresSafeArea()
+        }
+        .background(MenuWindowTransparency())
         .onAppear {
             state.refreshDeviceList()
         }
@@ -274,5 +311,34 @@ private struct AirPlayPairingControls: View {
     private func submit() {
         guard pin.trimmingCharacters(in: .whitespaces).count >= 4 else { return }
         state.submitPairingPIN(pin)
+    }
+}
+
+/// The menu-bar window draws its blur in a visual-effect view that wraps
+/// the SwiftUI content, so fading it would fade the text too. Instead,
+/// switch it to blend within the (clear) window, which makes it
+/// effectively see-through; the content draws its own adjustable blur.
+private struct MenuWindowTransparency: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { Probe() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    final class Probe: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            var changed = 0
+            var view: NSView? = superview
+            while let current = view {
+                if let effect = current as? NSVisualEffectView {
+                    effect.blendingMode = .withinWindow
+                    effect.state = .active
+                    changed += 1
+                }
+                view = current.superview
+            }
+            NSLog("[SoundCast][Menu] transparency: switched \(changed) enclosing background view(s)")
+        }
     }
 }

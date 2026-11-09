@@ -27,6 +27,7 @@ public final class RingBuffer: @unchecked Sendable {
     private var readIndex = 0
     private var count = 0
     private var lock = os_unfair_lock()
+    private var peakSinceTaken: Float = 0
 
     public init(capacitySamples: Int) {
         capacity = capacitySamples
@@ -53,10 +54,14 @@ public final class RingBuffer: @unchecked Sendable {
     /// Producer side — call only from the capture callback.
     public func write(_ samples: UnsafePointer<Float>, count sampleCount: Int) {
         os_unfair_lock_lock(&lock)
+        var peak = peakSinceTaken
         for i in 0..<sampleCount {
-            storage[writeIndex] = samples[i]
+            let sample = samples[i]
+            storage[writeIndex] = sample
             writeIndex = (writeIndex + 1) % capacity
+            peak = max(peak, abs(sample))
         }
+        peakSinceTaken = peak.isFinite ? peak : 0
         if count + sampleCount > capacity {
             // Overflow: the oldest samples were overwritten, so move the
             // read position up to the oldest surviving sample instead of
@@ -81,6 +86,14 @@ public final class RingBuffer: @unchecked Sendable {
             count = keepSamples
         }
         os_unfair_lock_unlock(&lock)
+    }
+
+    /// Loudest absolute sample written since the last call (for level
+    /// meters), then resets it.
+    public func takePeak() -> Float {
+        os_unfair_lock_lock(&lock)
+        defer { peakSinceTaken = 0; os_unfair_lock_unlock(&lock) }
+        return peakSinceTaken
     }
 
     /// Discards everything buffered (consumer side).

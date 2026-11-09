@@ -1,4 +1,5 @@
 import Combine
+import CoreAudio
 import Foundation
 import Network
 import SwiftUI
@@ -83,6 +84,20 @@ final class AppState: ObservableObject {
     /// across everything playing, not per-source. Per-source balance is
     /// what the per-device sliders are for.
     @Published var masterVolume: Float = 1.0
+    /// 0 = solid, 1 = most see-through; for the widget and menu backgrounds.
+    @Published var transparency: Double =
+        (UserDefaults.standard.object(forKey: "Transparency") as? Double) ?? 0.5 {
+        didSet { UserDefaults.standard.set(transparency, forKey: "Transparency") }
+    }
+    /// Recent audio level (0...1) per running source, for the meters.
+    @Published private(set) var sourceLevels: [CastSource: Float] = [:]
+    private var levelTask: Task<Void, Never>?
+    /// Extra delay (ms, may be negative) for this Mac's outputs on top of
+    /// the AirPlay alignment, to absorb e.g. a TV's own audio delay.
+    @Published private(set) var syncOffsetMilliseconds: Double =
+        UserDefaults.standard.double(forKey: AppState.syncOffsetKey)
+    private static let syncOffsetKey = "SyncOffsetMilliseconds"
+    private var syncOffsetTask: Task<Void, Never>?
     @Published var launchAtLoginEnabled: Bool = LaunchAtLogin.isEnabled
     @Published var lastErrorBySource: [CastSource: String] = [:]
     /// Per AirPlay device: "Connecting…", "Playing", or an error message.
@@ -127,6 +142,7 @@ final class AppState: ObservableObject {
     init() {
         // A previous run that switched the output and then crashed.
         restoreSystemOutput()
+        watchLocalDevices()
         airPlayDiscovery.$receivers
             .sink { [weak self] receivers in
                 guard let self else { return }
@@ -235,10 +251,10 @@ final class AppState: ObservableObject {
     var isCasting: Bool { !activeSources.isEmpty }
 
     /// What the panel's master switch turns back on after being switched off.
-    private var resumeSources: Set<CastSource> = [.globalTap]
+    private var resumeSources: Set<CastSource> = [.virtualDevice(.main)]
 
     /// The panel's single master switch: off stops every source (remembering
-    /// which were on); on restores them, or "Cast Everything" the first time.
+    /// which was on); on restores it, or "SoundCast" the first time.
     func setCasting(_ on: Bool) {
         if on {
             guard !isCasting else { return }
@@ -261,6 +277,38 @@ final class AppState: ObservableObject {
     }
 
     /// Every device currently receiving audio from any active source, de-duplicated.
+    /// Meter level for a device: the loudest running source it plays.
+    func level(for device: SoundDevice) -> Float {
+        Self.allSources
+            .filter { selectedDeviceIDsBySource[$0]?.contains(device.id) == true }
+            .compactMap { sourceLevels[$0] }
+            .max() ?? 0
+    }
+
+    /// Samples each session's peak ~12 times a second while any source runs.
+    private func updateLevelMetering() {
+        guard !runningSessions.isEmpty else {
+            levelTask?.cancel()
+            levelTask = nil
+            if !sourceLevels.isEmpty { sourceLevels = [:] }
+            return
+        }
+        guard levelTask == nil else { return }
+        levelTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 80_000_000)
+                guard let self else { return }
+                var levels: [CastSource: Float] = [:]
+                for (source, session) in self.runningSessions {
+                    let peak = min(1, session.ringBuffer.takePeak())
+                    // Fast attack, slower release, so the bars don't flicker.
+                    levels[source] = max(peak, (self.sourceLevels[source] ?? 0) * 0.7)
+                }
+                if levels != self.sourceLevels { self.sourceLevels = levels }
+            }
+        }
+    }
+
     var activeDevices: [SoundDevice] {
         var seen = Set<String>()
         var result: [SoundDevice] = []
@@ -275,6 +323,45 @@ final class AppState: ObservableObject {
     /// Active source names, in display order.
     var activeSourceNames: [String] {
         Self.allSources.filter { isActive($0) }.map(\.displayName)
+    }
+
+    /// Keeps the local device list current as speakers connect and
+    /// disconnect (e.g. a Bluetooth speaker moving to another Mac). Ticks
+    /// are kept: a missing device is skipped and returns when it does.
+    private func watchLocalDevices() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main) { [weak self] _, _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let before = Set(self.localDevices.map(\.id))
+                self.refreshDeviceList()
+                guard Set(self.localDevices.map(\.id)) != before else { return }
+                NSLog("[SoundCast][AppState] output devices changed: \(self.localDevices.map(\.name))")
+                for source in Self.allSources where self.isActive(source) {
+                    self.applySelectionToRunningOutput(for: source)
+                }
+            }
+        }
+    }
+
+    /// "Couldn't start BP10 (macOS error 'nope')" instead of a raw OSStatus.
+    private func describe(_ error: Error, devices: [SoundDevice]) -> String {
+        let names = devices.map(\.name).joined(separator: ", ")
+        switch error {
+        case LocalOutputEngine.OutputError.failedToStartIO(let status),
+             LocalOutputEngine.OutputError.failedToCreateAggregateDevice(let status):
+            let code = UInt32(bitPattern: status)
+            let bytes = [24, 16, 8, 0].map { UInt8((code >> UInt32($0)) & 0xFF) }
+            let fourCC = bytes.allSatisfy { (0x20...0x7E).contains($0) }
+                ? "'\(String(decoding: bytes, as: UTF8.self))'" : "\(status)"
+            return "Couldn't play to \(names.isEmpty ? "the selected outputs" : names) (macOS error \(fourCC)). Is it connected to this Mac?"
+        default:
+            return "\(error)"
+        }
     }
 
     func refreshDeviceList() {
@@ -359,6 +446,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Saves the offset at once; rebuilds affected local outputs once the
+    /// slider has been still for a moment (each rebuild re-buffers).
+    func setSyncOffset(milliseconds: Double) {
+        let value = max(-500, min(500, milliseconds.rounded()))
+        guard value != syncOffsetMilliseconds else { return }
+        syncOffsetMilliseconds = value
+        UserDefaults.standard.set(value, forKey: Self.syncOffsetKey)
+        syncOffsetTask?.cancel()
+        syncOffsetTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard let self, !Task.isCancelled else { return }
+            for source in Self.allSources where self.isActive(source)
+                && self.selectedDeviceIDsBySource[source]?.contains(where: { $0.hasPrefix("airplay:") }) == true {
+                self.applySelectionToRunningOutput(for: source)
+            }
+        }
+    }
+
     func setMasterVolume(_ volume: Float) {
         masterVolume = volume
         for session in runningSessions.values {
@@ -386,6 +491,13 @@ final class AppState: ObservableObject {
     func setActive(_ source: CastSource, on: Bool) {
         guard isActive(source) != on else { return }
         if on {
+            // "Cast Everything" mutes every app at the source while it taps
+            // them, which silences what apps send to the SoundCast device
+            // too, so the two sources can't usefully run together.
+            for other in Self.allSources where other != source && isActive(other) {
+                NSLog("[SoundCast][AppState] turning off \(other.displayName) (only one source at a time)")
+                setActive(other, on: false)
+            }
             // Route the Mac's sound into the virtual device first: playing
             // to it is also what makes the driver create its shared buffer.
             if case .virtualDevice(let preset) = source { switchSystemOutput(to: preset) }
@@ -496,6 +608,7 @@ final class AppState: ObservableObject {
             }
             activeSources.insert(source)
             lastErrorBySource[source] = nil
+            updateLevelMetering()
             return .started
         } catch {
             captureEngine.stop()
@@ -524,14 +637,17 @@ final class AppState: ObservableObject {
         runningSessions[source]?.stop()
         runningSessions[source] = nil
         activeSources.remove(source)
+        updateLevelMetering()
     }
 
     private func applySelectionToRunningOutput(for source: CastSource) {
         guard let session = runningSessions[source] else { return }
         do {
             try applySelection(on: session.output, for: source)
+            if lastErrorBySource[source]?.hasPrefix("Couldn't play to") == true { lastErrorBySource[source] = nil }
         } catch {
-            lastErrorBySource[source] = "Failed to update outputs: \(error)"
+            let selected = selectedDeviceIDsBySource[source] ?? []
+            lastErrorBySource[source] = describe(error, devices: localDevices.filter { selected.contains($0.id) })
             NSLog("[SoundCast][AppState] applySelectionToRunningOutput(\(source.displayName)) failed: \(error)")
         }
     }
@@ -551,7 +667,7 @@ final class AppState: ObservableObject {
         // AirPlay rooms play a fixed time after capture; hold local
         // outputs back by the same amount so every room is in step.
         outputEngine.alignmentDelaySeconds = selected.contains { $0.hasPrefix("airplay:") }
-            ? AirPlayRealtimeSender.playbackLatencySeconds : 0
+            ? max(0, AirPlayRealtimeSender.playbackLatencySeconds + syncOffsetMilliseconds / 1000) : 0
         try outputEngine.reconfigure(targets: targets)
     }
 

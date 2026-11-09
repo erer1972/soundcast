@@ -74,6 +74,9 @@ echo "== Assembling .app bundle =="
 rm -rf "dist"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources"
 cp "$EXECUTABLE" "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+# Fixed Mach-O UUID so macOS keeps the Local Network permission across
+# rebuilds (it is keyed by this UUID, not by the signing identity).
+python3 scripts/set_macho_uuid.py "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}" 5A0C4D1E-3B7F-4E2A-9C61-7D8E2F4B6A10
 cp Resources/Info.plist "${APP_BUNDLE}/Contents/Info.plist"
 cp "$SMOKETEST_EXECUTABLE" "dist/LocalOutputSmokeTest"
 cp "$CAPTURETEST_EXECUTABLE" "dist/CaptureSmokeTest"

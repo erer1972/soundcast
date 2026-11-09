@@ -22,6 +22,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
     }
 
     private static let chunkFrames = 960
+    private static let reserveSeconds = 0.2
     private static let waveLength: UInt32 = 2_147_483_644
     private let source: RingBuffer
     private let sampleRate: Double
@@ -276,13 +277,35 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         var chunks = 0
         var remaining = audioBytes
         var silentFrames = Int(sampleRate * delaySeconds)
+        var shortChunks = 0
+        defer { NSLog("[SoundCast][SonosHTTPAudioServer] stream ended: \(chunks) chunks, \(shortChunks) short, peak \(peak)") }
+
+        // Start from a small reserve: the capture arrives in ~5 ms bursts
+        // while this loop sends exact 20 ms chunks, so without one, chunks
+        // regularly came up short and were padded with silence (stutter).
+        // Older backlog is dropped so the speaker isn't needlessly late.
+        let reserveSamples = Int(sampleRate * Self.reserveSeconds) * 2
+        source.trim(toAtMost: reserveSamples)
+        let prefillDeadline = ProcessInfo.processInfo.systemUptime + 1
+        while isRunning && source.framesAvailable < reserveSamples
+                && ProcessInfo.processInfo.systemUptime < prefillDeadline {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
         var nextDeadline = ProcessInfo.processInfo.systemUptime
-        defer { NSLog("[SoundCast][SonosHTTPAudioServer] stream ended: \(chunks) chunks, peak \(peak)") }
 
         while isRunning && remaining > 0 {
             var samples = [Float](repeating: 0, count: Self.chunkFrames * 2)
             let silent = min(silentFrames, Self.chunkFrames)
             silentFrames -= silent
+            // If the reserve ran dry, give the next capture burst a moment
+            // rather than padding this chunk with silence.
+            let needed = (Self.chunkFrames - silent) * 2
+            var waited = 0.0
+            while isRunning && source.framesAvailable < needed && waited < 0.04 {
+                Thread.sleep(forTimeInterval: 0.002)
+                waited += 0.002
+            }
+            if source.framesAvailable < needed { shortChunks += 1 }
             let status = samples.withUnsafeMutableBufferPointer {
                 readStream(clientID, into: $0.baseAddress!.advanced(by: silent * 2), count: $0.count - silent * 2)
             }
