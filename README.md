@@ -187,8 +187,9 @@ unverified.
 
 - **Casting toggle**: on/off for the whole capture+output pipeline.
 - **Device list**: grouped "This Mac" / "Bluetooth" / "AirPlay" / "Sonos".
-  AirPlay receivers are discovered and selectable; the experimental Sonos
-  S1/UPnP backend is not yet selectable in the app. AirPlay-enabled Sonos
+  AirPlay receivers and Sonos S1 speakers are discovered and selectable
+  (Sonos streams the selected source as live WAV over HTTP; a failed Sonos
+  room shows a Retry button). AirPlay-enabled Sonos
   devices may appear under AirPlay, but have not been independently validated. Click a device
   to tick/untick it; multi-select works — tick several at once.
 - **Per-device slider**: appears under a ticked device, controls that

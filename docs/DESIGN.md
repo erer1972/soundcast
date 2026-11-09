@@ -483,9 +483,18 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
   may not recover automatically.
   Mixed AirPlay and Sonos output can use a manually calibrated delay, but is
   not clock-synchronized. Only one Sonos HTTP request consumes its ring at a
-  time; a new receiver request replaces the previous reader. Longer playback, range requests, and other receivers
-  remain unverified. Sonos UI integration is not implemented, and AirPlay-enabled
-  Sonos devices are not independently validated.
+  time; a new receiver request replaces the previous reader. Longer playback and other receivers
+  remain unverified, and AirPlay-enabled Sonos devices are not independently validated.
+
+  **Update 2026-11-09.** The HTTP server now uses `NWListener`/`NWConnection`.
+  After a dropped connection the Sonos reconnects by itself with
+  `Range: bytes=N-`; the server answers `206 Partial Content` with live audio
+  from that point (answering `200` from offset 0 made the Sonos reset the
+  connection and stop). All silent probes pass against the SYMFONISK speaker.
+  Sonos is now selectable in the app (per-room status, Retry, volume sync,
+  `--cast-sonos <room>` launch argument); app casting from the SoundCast virtual
+  device was confirmed by ear. The in-app ticking UI itself has not yet been
+  clicked through by hand.
 
 ## 11. Phase 1.5 status and findings (2026-11-06)
 
