@@ -452,7 +452,40 @@ bake the `-march=westmere` flag and the `otool`/`objdump` check into
   - Confirmed directly via SSH: `sw_vers` reports macOS **26.7.1** (build `25G241`); CPU is a **Xeon W3680 @ 3.33GHz** (Westmere), with a feature-flag list topping out at **SSE4.2** and no AVX/AVX2/FMA/F16C present anywhere in it — directly validating §8's constraint is real, not precautionary.
 - **(new, not blocking, your call whenever)** Are you already building with Xcode / a specific Swift toolchain on the MacBook, or do you want `build.sh` to assume only Apple's bundled `swift`/`swiftc` from Xcode Command Line Tools (simpler, fewer moving parts, and sidesteps any question of a separately-installed toolchain's own default `-march`)?
 
-## 10. Current phase status (2026-11-08)
+## 10. Current phase status (2026-11-09)
+
+**Summary 2026-11-09.** Everything below is now usable from the app on the
+Mac Pro 5,1 and an Intel MacBook Pro (i5-7360U, macOS 26.7.2, relaxed SIP),
+verified by ear:
+
+- Driver: one "SoundCast" device (Preset 1–4 removed) with volume and mute
+  controls (gain = scalar², applied before the shared ring), so the Mac's
+  volume keys work. The driver loads on both Macs. It still reports zero
+  latency.
+- Sources: one at a time ("Cast Everything" mutes every app at the source,
+  which silenced the SoundCast device when both ran). Turning on "SoundCast"
+  selects it as the system output and restores the previous output on stop,
+  quit, or next launch after a crash.
+- Local output: `StreamResampler` converts 48 kHz to the clock device's rate
+  (e.g. 44.1 kHz Bluetooth, which stuttered before), holds a small reserve
+  with ±0.5 % drift control, and trims backlog. A Bluetooth sub-device is the
+  aggregate's clock device.
+- Sync: AirPlay receivers play `latencyFrames` (2.0 s) after capture; local
+  outputs are delayed by the same amount minus the clock device's reported
+  latency, plus a user offset (AirPlay Sync slider). Bluetooth + Apple TVs
+  were reported "nearly in sync". Sonos is not aligned.
+- Sonos: in-app casting, `Range`/`206` reconnects, 200 ms stream reserve
+  (fixed stutter on Wi-Fi; 0 short chunks in a 32 s test).
+- App: live level meters, transparency, AirPlay entries of Sonos speakers
+  hidden (avoids a PIN prompt), device list follows hot-plugging, pinned
+  Mach-O UUID so the Local Network grant survives rebuilds.
+
+Open: driver latency reporting for A/V sync, Sonos alignment, detecting
+another sender taking over an AirPlay room (two Macs on one room keep
+re-taking it), receiver-initiated AirPlay stop/restart, a stock-SIP Mac.
+
+The per-phase notes below are the earlier record.
+
 
 1. **Phase 1 — complete.** Global process-tap capture and local multi-output
   were validated audibly on five Mac Pro 5,1 output devices.

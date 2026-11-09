@@ -1,31 +1,38 @@
 # SoundCast
 
-Status: **Phase 1 + 1.5 done. Phase 2 (AirPlay 2 sender) in progress.**
+Status (2026-11-09): **Phases 1 and 1.5 done; AirPlay 2 and Sonos S1 casting
+work in the app.** Tested on a Mac Pro 5,1 and an Intel MacBook Pro
+(both macOS 26) with three Apple TVs, a Sonos SYMFONISK speaker and a
+Bluetooth speaker.
 
-- **Phase 1:** global "cast everything" capture + local multi-output
-  (built-in speakers, Bluetooth, any Core Audio device) with per-device
-  and master volume, plus a menu bar UI.
-- **Phase 1.5:** a system-wide virtual output device ("SoundCast" plus
-  four presets) implemented as a HAL driver in `HALPlugin/`, so any app can
-  send its audio to SoundCast through the normal macOS output picker.
-  Installs and activates on the Mac Pro. Each preset is now an
-  independent, simultaneously-active capture+output session in the menu
-  bar UI — validated on real hardware with two presets casting to
-  different rooms at once with zero cross-contamination (see
-  `docs/DESIGN.md` §7.3).
-- **Floating panel:** an always-on-top desktop panel (compact or expanded)
-  with the master switch, volume and per-source / per-device controls.
-  Turn it on from the menu bar ("Show Floating Panel").
-- **Single instance:** launching a second copy exits immediately.
-- **Phase 2 (in progress):** AirPlay discovery, PIN pairing, realtime
-  streaming, and retry after a simulated session drop are implemented.
-  Pairing and audible playback were validated on two AppleTV6,2 receivers;
-  receiver-initiated stops/restarts and multi-room sync remain unverified.
-  The in-menu pairing UI still needs a manual test. Sonos S1 discovery,
-  playback and master-volume control, and experimental WAV streaming are implemented in the
-  backend. A CLI test played audio from the SoundCast virtual device on a
-  SYMFONISK speaker; Sonos integration in the app UI remains future work.
-  AirPlay-enabled Sonos receivers are not independently validated.
+- **Sources (one at a time):**
+  - **SoundCast** — a system-wide virtual output device (HAL driver in
+    `HALPlugin/`). Turning this source on switches the Mac's output to it
+    and restores your previous output when it's turned off or the app quits.
+    The device has its own volume and mute, so the Mac's volume keys and
+    Sound menu slider work while it's selected.
+  - **Cast Everything** — captures all Mac audio with a process tap (and
+    mutes it locally while casting).
+- **Rooms:** any local Core Audio output (built-in, wired, USB, Bluetooth),
+  AirPlay 2 receivers (Apple TVs, with PIN pairing) and Sonos S1 speakers
+  (live WAV over HTTP; no pairing). Tick several at once.
+- **Sync:** AirPlay rooms play a fixed 2.0 s after capture; local outputs
+  are held back by the same amount (minus the device's own reported delay)
+  so they play together. An **AirPlay Sync** slider fine-tunes the rest.
+  Sonos is not yet aligned with the other rooms.
+- **Local output:** rate conversion to the device's rate (e.g. 44.1 kHz
+  Bluetooth) with drift control, so Bluetooth speakers don't stutter.
+- **Robustness:** AirPlay retries after a dropped session; Sonos recovers
+  from dropped connections (answers its `Range` reconnects with `206`) and
+  streams from a small reserve, so Wi-Fi jitter doesn't cause gaps. The
+  device list follows speakers as they connect and disconnect.
+- **UI:** menu bar window plus an always-on-top floating panel with live
+  level meters; adjustable transparency for both. Single instance.
+
+Not done yet: making video players wait for the delayed audio (the driver
+reports zero latency), aligning Sonos with the other rooms, handling another
+sender taking over an AirPlay room (two Macs on one room keep taking it from
+each other), and receiver-initiated AirPlay stop/restart.
 
 See `docs/DESIGN.md` for the full architecture, the research behind the
 AirPlay 2 and HAL-driver decisions, and the phase plan.
@@ -98,9 +105,8 @@ cd HALPlugin
 ```
 
 Installing restarts the system audio daemon, so audio cuts out briefly.
-Only the main "SoundCast" device is allowed to be the system default
-output; the four presets are for per-app routing and are selected in an
-app's own output picker. To remove everything: `./uninstall.sh`.
+The driver publishes one device, "SoundCast", with volume and mute
+controls. To remove everything: `./uninstall.sh`.
 
 ## Run
 
@@ -185,16 +191,21 @@ unverified.
 
 ## Using it
 
-- **Casting toggle**: on/off for the whole capture+output pipeline.
+- **Sources**: "Cast Everything" or "SoundCast" — one at a time (turning
+  one on turns the other off). The floating panel's main switch resumes the
+  last one, or "SoundCast" the first time.
 - **Device list**: grouped "This Mac" / "Bluetooth" / "AirPlay" / "Sonos".
-  AirPlay receivers and Sonos S1 speakers are discovered and selectable
-  (Sonos streams the selected source as live WAV over HTTP; a failed Sonos
-  room shows a Retry button). AirPlay-enabled Sonos
-  devices may appear under AirPlay, but have not been independently validated. Click a device
-  to tick/untick it; multi-select works — tick several at once.
+  Click a device to tick/untick it; tick several at once. An Apple TV that
+  isn't paired yet shows **Pair…** (enter the PIN shown on the TV; each Mac
+  pairs separately). A failed Sonos room shows **Retry**. Sonos speakers
+  that also advertise AirPlay are listed once, under Sonos.
 - **Per-device slider**: appears under a ticked device, controls that
-  device's own gain.
-- **Master Volume**: overall gain on top of every device's own slider.
+  device's own gain (for Sonos, its own volume).
+- **Master Volume**: overall gain on top of every device's own slider. With
+  the SoundCast output selected, the Mac's volume keys also work.
+- **AirPlay Sync**: −500…+500 ms; move right if this Mac's speakers play
+  ahead of the Apple TVs, left if behind.
+- **Transparency**: how see-through the menu and floating panel are.
 - **Launch at Login**: standard `SMAppService` toggle, no helper app.
 - **Refresh Devices**: re-scans Core Audio's device list (e.g. after
   pairing a new Bluetooth speaker).
@@ -223,8 +234,8 @@ Not needed for anything in Phase 1 or this README's instructions. If
 you ever want to distribute `SoundCast.app` to another machine *without*
 copying it there directly (e.g. via download, where Gatekeeper's
 quarantine flag would apply), or if the HAL driver fails on a stock-SIP
-Mac (the Mac Pro's OCLP setup has passed; the Intel MacBook remains
-untested), the path is:
+Mac (both the Mac Pro and the Intel MacBook Pro run relaxed SIP
+configurations and load it; a stock-SIP Mac remains untested), the path is:
 enroll in the Apple Developer Program ($99/yr), get a Developer ID
 Application certificate, `codesign --sign "Developer ID Application: ..."`
 instead of the local identity, then `xcrun notarytool submit` +
