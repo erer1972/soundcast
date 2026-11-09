@@ -71,6 +71,18 @@ public final class RingBuffer: @unchecked Sendable {
         }
     }
 
+    /// Drops the oldest queued samples so at most `keepSamples` remain
+    /// (consumer side). Used to shed a backlog instead of playing it late.
+    public func trim(toAtMost keepSamples: Int) {
+        os_unfair_lock_lock(&lock)
+        if count > keepSamples {
+            let drop = count - keepSamples
+            readIndex = (readIndex + drop) % capacity
+            count = keepSamples
+        }
+        os_unfair_lock_unlock(&lock)
+    }
+
     /// Discards everything buffered (consumer side).
     public func clear() {
         os_unfair_lock_lock(&lock)

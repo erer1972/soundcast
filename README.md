@@ -249,6 +249,12 @@ security delete-identity -c "SoundCast Local Signing" ~/Library/Keychains/soundc
 
 ## Troubleshooting
 
+- **App can't see AirPlay/Sonos devices after a rebuild** (log shows
+  "Local network prohibited"): macOS ties the Local Network permission to the
+  executable's build ID, which changes on every code change, even with the
+  stable signing identity. Toggle SoundCast off and on in System Settings →
+  Privacy & Security → Local Network, then relaunch the app.
+
 - **Build fails at the Westmere check step**: see step 3 above — it
   names the offending binary and instruction. Most likely cause: a
   future dependency added without routing through `Package.swift`'s

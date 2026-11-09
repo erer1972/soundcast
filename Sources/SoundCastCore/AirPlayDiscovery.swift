@@ -15,6 +15,8 @@ public struct AirPlayReceiver: Identifiable, Hashable, Sendable {
     /// literally the room name, exactly what the room picker should show.
     public let name: String
     public let model: String?
+    /// The "manufacturer" TXT field, e.g. "Sonos" (Apple TVs omit it).
+    public let manufacturer: String?
     /// Best-effort display hint, not a protocol fact: every device seen
     /// on this project's own LAN scan that supports AirPlay 2 grouping
     /// (all three Apple TVs on tvOS 26/27, and the AirPlay-2-capable
@@ -24,10 +26,11 @@ public struct AirPlayReceiver: Identifiable, Hashable, Sendable {
     public let supportsAirPlay2: Bool
     public let endpoint: NWEndpoint
 
-    public init(id: String, name: String, model: String?, supportsAirPlay2: Bool, endpoint: NWEndpoint) {
+    public init(id: String, name: String, model: String?, manufacturer: String? = nil, supportsAirPlay2: Bool, endpoint: NWEndpoint) {
         self.id = id
         self.name = name
         self.model = model
+        self.manufacturer = manufacturer
         self.supportsAirPlay2 = supportsAirPlay2
         self.endpoint = endpoint
     }
@@ -94,6 +97,7 @@ public final class AirPlayDiscovery: ObservableObject {
                 id: deviceID,
                 name: name,
                 model: model,
+                manufacturer: Self.string(txt, "manufacturer"),
                 supportsAirPlay2: supportsAirPlay2,
                 endpoint: result.endpoint
             )

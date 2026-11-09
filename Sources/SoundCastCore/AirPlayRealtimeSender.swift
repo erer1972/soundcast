@@ -42,6 +42,9 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
     private static let framesPerPacket = 352
     /// 2 s, matching `latencyMax` and the `0xD7` anchor lead.
     private static let latencyFrames: UInt32 = 88_200
+    /// How long after capture a receiver plays each frame; local outputs
+    /// are delayed by the same amount to stay in step with AirPlay rooms.
+    public static var playbackLatencySeconds: Double { Double(latencyFrames) / outputSampleRate }
 
     private var connection: AirPlayRTSPConnection?
     private var eventConnection: AirPlayRTSPConnection?

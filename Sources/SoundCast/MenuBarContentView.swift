@@ -4,6 +4,14 @@ import SoundCastCore
 struct MenuBarContentView: View {
     @ObservedObject var state: AppState
     @ObservedObject var panel: FloatingPanelController
+    @State private var sourceListHeight: CGFloat = 0
+
+    /// The menu grows with expanded sources; it only scrolls once it would
+    /// no longer fit on the screen (leaving room for the other controls).
+    private var maxSourceListHeight: CGFloat {
+        let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
+        return max(200, screenHeight - 260)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -20,18 +28,25 @@ struct MenuBarContentView: View {
 
             Divider()
 
-            Text("Each source below is independent — turn on several at once to route different apps/presets to different rooms simultaneously.")
+            Text("\"Cast Everything\" sends all Mac audio; \"SoundCast\" sends only apps whose output is set to the SoundCast device.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
+            // A menu-bar window sizes to its content's minimum, which for a
+            // bare ScrollView is zero height, so size it to the measured
+            // content, capped at what fits on screen.
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(AppState.allSources, id: \.self) { source in
                         SourceSection(source: source, state: state)
                     }
                 }
+                .background(GeometryReader { proxy in
+                    Color.clear.preference(key: SourceListHeightKey.self, value: proxy.size.height)
+                })
             }
-            .frame(maxHeight: 360)
+            .frame(height: min(max(sourceListHeight, 1), maxSourceListHeight))
+            .onPreferenceChange(SourceListHeightKey.self) { sourceListHeight = $0 }
 
             Divider()
 
@@ -61,6 +76,11 @@ struct MenuBarContentView: View {
             state.refreshDeviceList()
         }
     }
+}
+
+private struct SourceListHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 /// One source (global tap, or one virtual-device preset): its own

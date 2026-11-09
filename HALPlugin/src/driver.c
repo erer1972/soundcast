@@ -28,10 +28,13 @@
  *
  * Object model (fixed, static):
  *   AudioObjectID 1 = the plug-in itself (kAudioObjectPlugInObject, host-defined)
- *   Each slot below contributes one device object ID and one stream object ID.
+ *   Each slot below contributes a device, a stream, and output volume +
+ *   mute control object IDs (the volume/mute are applied to the audio
+ *   before it reaches the shared ring).
  */
 
 #include <CoreAudio/AudioServerPlugIn.h>
+#include <math.h>
 #include <CoreFoundation/CFPlugInCOM.h>
 
 // kAudioDevicePropertyBufferFrameSize/Range live in AudioHardware.h (the
@@ -107,6 +110,8 @@ typedef struct {
 typedef struct {
     AudioObjectID deviceID;
     AudioObjectID streamID;
+    AudioObjectID volumeControlID; // output volume (kAudioVolumeControlClassID)
+    AudioObjectID muteControlID;   // output mute (kAudioMuteControlClassID)
     CFStringRef name;
     CFStringRef uid;
     const char* shmName;
@@ -124,25 +129,60 @@ typedef struct {
     // GetZeroTimeStamp). startCount lets multiple clients start/stop IO.
     _Atomic uint64_t anchorHostTime;
     _Atomic uint32_t startCount;
+    // Volume slider position 0...1 (stored as float bits) and mute flag,
+    // read on the IO thread, written by SetPropertyData.
+    _Atomic uint32_t volumeScalarBits;
+    _Atomic uint32_t muted;
 } SoundCastDeviceSlot;
 
 // Saved in Initialize so property changes can be announced to the host.
 static AudioServerPlugInHostRef gHost = NULL;
 
-#define NUM_SOUNDCAST_DEVICES 5
+// Only the main "SoundCast" device (2026-11-09: the four "Preset" slots
+// were dropped as unneeded). The slot table stays so more devices can be
+// added back by appending entries with fresh object IDs.
+#define NUM_SOUNDCAST_DEVICES 1
 
 static SoundCastDeviceSlot gDeviceSlots[NUM_SOUNDCAST_DEVICES] = {
-    { 2, 3, CFSTR("SoundCast"), CFSTR("com.soundcast.device"),
-      "/soundcast_output_v1", 512, NULL, PTHREAD_MUTEX_INITIALIZER },
-    { 4, 5, CFSTR("SoundCast - Preset 1"), CFSTR("com.soundcast.device.preset1"),
-      "/soundcast_output_preset1", 512, NULL, PTHREAD_MUTEX_INITIALIZER },
-    { 6, 7, CFSTR("SoundCast - Preset 2"), CFSTR("com.soundcast.device.preset2"),
-      "/soundcast_output_preset2", 512, NULL, PTHREAD_MUTEX_INITIALIZER },
-    { 8, 9, CFSTR("SoundCast - Preset 3"), CFSTR("com.soundcast.device.preset3"),
-      "/soundcast_output_preset3", 512, NULL, PTHREAD_MUTEX_INITIALIZER },
-    { 10, 11, CFSTR("SoundCast - Preset 4"), CFSTR("com.soundcast.device.preset4"),
-      "/soundcast_output_preset4", 512, NULL, PTHREAD_MUTEX_INITIALIZER },
+    { 2, 3, 4, 5, CFSTR("SoundCast"), CFSTR("com.soundcast.device"),
+      "/soundcast_output_v1", 512, NULL, PTHREAD_MUTEX_INITIALIZER,
+      0, 0, 0x3F800000u /* 1.0f */, 0 },
 };
+
+// Volume taper: gain = scalar^2, so dB = 40*log10(scalar). Half-way on the
+// slider is about -12 dB, which sounds roughly half as loud.
+static const Float32 kVolumeMinDB = -96.0f;
+
+static Float32 SoundCastNull_ScalarToDB(Float32 scalar)
+{
+    if (scalar <= 0.0f) { return kVolumeMinDB; }
+    Float32 db = 40.0f * log10f(scalar);
+    return db < kVolumeMinDB ? kVolumeMinDB : db;
+}
+
+static Float32 SoundCastNull_DBToScalar(Float32 db)
+{
+    if (db <= kVolumeMinDB) { return 0.0f; }
+    if (db >= 0.0f) { return 1.0f; }
+    return powf(10.0f, db / 40.0f);
+}
+
+static Float32 SoundCastNull_VolumeScalar(SoundCastDeviceSlot* slot)
+{
+    uint32_t bits = atomic_load(&slot->volumeScalarBits);
+    Float32 value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static void SoundCastNull_SetVolumeScalar(SoundCastDeviceSlot* slot, Float32 value)
+{
+    if (!(value >= 0.0f)) { value = 0.0f; }
+    if (value > 1.0f) { value = 1.0f; }
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    atomic_store(&slot->volumeScalarBits, bits);
+}
 
 static SoundCastDeviceSlot* SoundCastNull_FindSlotByDeviceID(AudioObjectID deviceID)
 {
@@ -156,6 +196,22 @@ static SoundCastDeviceSlot* SoundCastNull_FindSlotByStreamID(AudioObjectID strea
 {
     for (int i = 0; i < NUM_SOUNDCAST_DEVICES; i++) {
         if (gDeviceSlots[i].streamID == streamID) { return &gDeviceSlots[i]; }
+    }
+    return NULL;
+}
+
+static SoundCastDeviceSlot* SoundCastNull_FindSlotByVolumeID(AudioObjectID objectID)
+{
+    for (int i = 0; i < NUM_SOUNDCAST_DEVICES; i++) {
+        if (gDeviceSlots[i].volumeControlID == objectID) { return &gDeviceSlots[i]; }
+    }
+    return NULL;
+}
+
+static SoundCastDeviceSlot* SoundCastNull_FindSlotByMuteID(AudioObjectID objectID)
+{
+    for (int i = 0; i < NUM_SOUNDCAST_DEVICES; i++) {
+        if (gDeviceSlots[i].muteControlID == objectID) { return &gDeviceSlots[i]; }
     }
     return NULL;
 }
@@ -236,8 +292,17 @@ static bool SoundCastNull_EnsureSharedRing(SoundCastDeviceSlot* slot)
     return ok;
 }
 
-static void SoundCastNull_WriteFrames(SoundCastDeviceSlot* slot, const float* interleavedStereo, UInt32 frameCount)
+static void SoundCastNull_WriteFrames(SoundCastDeviceSlot* slot, float* interleavedStereo, UInt32 frameCount)
 {
+    // Apply the device's own volume/mute in place (the host's mix buffer
+    // is ours to read for WriteMix) before publishing to the ring.
+    Float32 scalar = atomic_load(&slot->muted) ? 0.0f : SoundCastNull_VolumeScalar(slot);
+    Float32 gain = scalar * scalar;
+    if (gain != 1.0f) {
+        UInt32 samples = frameCount * kDeviceChannelCount;
+        for (UInt32 i = 0; i < samples; i++) { interleavedStereo[i] *= gain; }
+    }
+
     SoundCastSharedRing* ring = atomic_load_explicit(&slot->sharedRing, memory_order_acquire);
     if (ring == NULL) { return; }
     uint32_t capacity = ring->capacityFrames;
@@ -404,6 +469,21 @@ static Boolean SoundCastNull_HasProperty(AudioServerPlugInDriverRef inDriver, Au
                 || sel == kAudioDevicePropertyClockDomain || sel == kAudioDevicePropertyIsHidden
                 || sel == kAudioDevicePropertyZeroTimeStampPeriod);
     }
+    if (SoundCastNull_FindSlotByVolumeID(inObjectID) != NULL) {
+        return (sel == kAudioObjectPropertyBaseClass || sel == kAudioObjectPropertyClass
+                || sel == kAudioObjectPropertyOwner || sel == kAudioObjectPropertyOwnedObjects
+                || sel == kAudioControlPropertyScope || sel == kAudioControlPropertyElement
+                || sel == kAudioLevelControlPropertyScalarValue || sel == kAudioLevelControlPropertyDecibelValue
+                || sel == kAudioLevelControlPropertyDecibelRange
+                || sel == kAudioLevelControlPropertyConvertScalarToDecibels
+                || sel == kAudioLevelControlPropertyConvertDecibelsToScalar);
+    }
+    if (SoundCastNull_FindSlotByMuteID(inObjectID) != NULL) {
+        return (sel == kAudioObjectPropertyBaseClass || sel == kAudioObjectPropertyClass
+                || sel == kAudioObjectPropertyOwner || sel == kAudioObjectPropertyOwnedObjects
+                || sel == kAudioControlPropertyScope || sel == kAudioControlPropertyElement
+                || sel == kAudioBooleanControlPropertyValue);
+    }
     if (SoundCastNull_FindSlotByStreamID(inObjectID) != NULL) {
         return (sel == kAudioObjectPropertyBaseClass
                 || sel == kAudioObjectPropertyClass || sel == kAudioObjectPropertyOwner
@@ -421,8 +501,11 @@ static OSStatus SoundCastNull_IsPropertySettable(AudioServerPlugInDriverRef inDr
     // BufferFrameSize must be settable — see design doc §7 for why
     // (hosts negotiate buffer size via Get *and* Set; this was the
     // actual root cause of the original single-device start failure).
-    *outIsSettable = (SoundCastNull_FindSlotByDeviceID(inObjectID) != NULL
-                       && inAddress->mSelector == kAudioDevicePropertyBufferFrameSize);
+    UInt32 sel = inAddress->mSelector;
+    *outIsSettable = (SoundCastNull_FindSlotByDeviceID(inObjectID) != NULL && sel == kAudioDevicePropertyBufferFrameSize)
+        || (SoundCastNull_FindSlotByVolumeID(inObjectID) != NULL
+            && (sel == kAudioLevelControlPropertyScalarValue || sel == kAudioLevelControlPropertyDecibelValue))
+        || (SoundCastNull_FindSlotByMuteID(inObjectID) != NULL && sel == kAudioBooleanControlPropertyValue);
     return noErr;
 }
 
@@ -453,10 +536,29 @@ static bool SoundCastNull_QualifierMatches(UInt32 qualifierSize, const void* qua
     if (qualifier == NULL || qualifierSize < sizeof(AudioClassID)) { return true; }
     const AudioClassID* classes = (const AudioClassID*)qualifier;
     UInt32 count = qualifierSize / (UInt32)sizeof(AudioClassID);
+    // A control also matches its base classes (volume -> level -> control).
+    AudioClassID level = 0, control = 0;
+    if (objectClass == kAudioVolumeControlClassID) { level = kAudioLevelControlClassID; control = kAudioControlClassID; }
+    if (objectClass == kAudioMuteControlClassID) { level = kAudioBooleanControlClassID; control = kAudioControlClassID; }
     for (UInt32 i = 0; i < count; i++) {
-        if (classes[i] == objectClass || classes[i] == kAudioObjectClassID) { return true; }
+        AudioClassID c = classes[i];
+        if (c == objectClass || c == kAudioObjectClassID || (level && c == level) || (control && c == control)) { return true; }
     }
     return false;
+}
+
+// Device-owned objects for a scope/qualifier: the stream, then the volume
+// and mute controls. Input scope has none. Returns how many were written
+// (or would be, when outIDs is NULL).
+static UInt32 SoundCastNull_DeviceOwnedObjects(const SoundCastDeviceSlot* slot, AudioObjectPropertyScope scope,
+                                               UInt32 qualifierSize, const void* qualifier, AudioObjectID* outIDs)
+{
+    if (scope == kAudioObjectPropertyScopeInput) { return 0; }
+    UInt32 n = 0;
+    if (SoundCastNull_QualifierMatches(qualifierSize, qualifier, kAudioStreamClassID)) { if (outIDs) outIDs[n] = slot->streamID; n++; }
+    if (SoundCastNull_QualifierMatches(qualifierSize, qualifier, kAudioVolumeControlClassID)) { if (outIDs) outIDs[n] = slot->volumeControlID; n++; }
+    if (SoundCastNull_QualifierMatches(qualifierSize, qualifier, kAudioMuteControlClassID)) { if (outIDs) outIDs[n] = slot->muteControlID; n++; }
+    return n;
 }
 
 static OSStatus SoundCastNull_PropertySize(AudioObjectID inObjectID, const AudioObjectPropertyAddress* inAddress, UInt32 inQualifierDataSize, const void* inQualifierData, UInt32* outDataSize)
@@ -466,8 +568,11 @@ static OSStatus SoundCastNull_PropertySize(AudioObjectID inObjectID, const Audio
 
     SoundCastDeviceSlot* deviceSlot = SoundCastNull_FindSlotByDeviceID(inObjectID);
     SoundCastDeviceSlot* streamSlot = SoundCastNull_FindSlotByStreamID(inObjectID);
+    SoundCastDeviceSlot* volumeSlot = SoundCastNull_FindSlotByVolumeID(inObjectID);
+    SoundCastDeviceSlot* muteSlot = SoundCastNull_FindSlotByMuteID(inObjectID);
 
-    if (inObjectID != kAudioObjectPlugInObject && deviceSlot == NULL && streamSlot == NULL) {
+    if (inObjectID != kAudioObjectPlugInObject && deviceSlot == NULL && streamSlot == NULL
+        && volumeSlot == NULL && muteSlot == NULL) {
         return kAudioHardwareBadObjectError;
     }
     if (!SoundCastNull_HasProperty(NULL, inObjectID, 0, inAddress)) {
@@ -497,10 +602,8 @@ static OSStatus SoundCastNull_PropertySize(AudioObjectID inObjectID, const Audio
             case kAudioObjectPropertyName: case kAudioObjectPropertyManufacturer: case kAudioDevicePropertyDeviceUID:
                 *outDataSize = sizeof(CFStringRef); break;
             case kAudioObjectPropertyOwnedObjects:
-                // Only the stream is ours; a qualifier asking for controls matches nothing.
-                *outDataSize = (inAddress->mScope == kAudioObjectPropertyScopeInput
-                                || !SoundCastNull_QualifierMatches(inQualifierDataSize, inQualifierData, kAudioStreamClassID))
-                    ? 0 : sizeof(AudioObjectID);
+                *outDataSize = SoundCastNull_DeviceOwnedObjects(deviceSlot, inAddress->mScope, inQualifierDataSize, inQualifierData, NULL)
+                    * (UInt32)sizeof(AudioObjectID);
                 break;
             case kAudioDevicePropertyStreams:
                 // Must match GetPropertyData's scope handling below — a
@@ -510,7 +613,7 @@ static OSStatus SoundCastNull_PropertySize(AudioObjectID inObjectID, const Audio
                 *outDataSize = (inAddress->mScope == kAudioObjectPropertyScopeInput) ? 0 : sizeof(AudioObjectID);
                 break;
             case kAudioObjectPropertyControlList:
-                *outDataSize = 0; break; // no volume/mute controls
+                *outDataSize = 2 * sizeof(AudioObjectID); break; // volume, mute
             case kAudioDevicePropertyDeviceIsAlive: case kAudioDevicePropertyDeviceCanBeDefaultDevice:
             case kAudioDevicePropertyLatency: case kAudioDevicePropertySafetyOffset:
             case kAudioDevicePropertyBufferFrameSize: case kAudioDevicePropertyTransportType:
@@ -520,6 +623,19 @@ static OSStatus SoundCastNull_PropertySize(AudioObjectID inObjectID, const Audio
             case kAudioDevicePropertyNominalSampleRate: *outDataSize = sizeof(Float64); break;
             case kAudioDevicePropertyAvailableNominalSampleRates: *outDataSize = sizeof(AudioValueRange); break;
             case kAudioDevicePropertyBufferFrameSizeRange: *outDataSize = sizeof(AudioValueRange); break;
+            default: break;
+        }
+    } else if (volumeSlot != NULL || muteSlot != NULL) {
+        switch (sel) {
+            case kAudioObjectPropertyBaseClass: case kAudioObjectPropertyClass:
+            case kAudioObjectPropertyOwner: *outDataSize = sizeof(AudioClassID); break;
+            case kAudioObjectPropertyOwnedObjects: *outDataSize = 0; break;
+            case kAudioControlPropertyScope: case kAudioControlPropertyElement:
+            case kAudioBooleanControlPropertyValue: *outDataSize = sizeof(UInt32); break;
+            case kAudioLevelControlPropertyScalarValue: case kAudioLevelControlPropertyDecibelValue:
+            case kAudioLevelControlPropertyConvertScalarToDecibels:
+            case kAudioLevelControlPropertyConvertDecibelsToScalar: *outDataSize = sizeof(Float32); break;
+            case kAudioLevelControlPropertyDecibelRange: *outDataSize = sizeof(AudioValueRange); break;
             default: break;
         }
     } else if (streamSlot != NULL) {
@@ -560,6 +676,8 @@ static OSStatus SoundCastNull_GetPropertyData(AudioServerPlugInDriverRef inDrive
 
     SoundCastDeviceSlot* deviceSlot = SoundCastNull_FindSlotByDeviceID(inObjectID);
     SoundCastDeviceSlot* streamSlot = SoundCastNull_FindSlotByStreamID(inObjectID);
+    SoundCastDeviceSlot* volumeSlot = SoundCastNull_FindSlotByVolumeID(inObjectID);
+    SoundCastDeviceSlot* muteSlot = SoundCastNull_FindSlotByMuteID(inObjectID);
 
     if (inObjectID == kAudioObjectPlugInObject) {
         switch (sel) {
@@ -614,16 +732,20 @@ static OSStatus SoundCastNull_GetPropertyData(AudioServerPlugInDriverRef inDrive
             case kAudioDevicePropertyDeviceUID:
                 *(CFStringRef*)outData = deviceSlot->uid; *outDataSize = sizeof(CFStringRef); break;
             case kAudioObjectPropertyOwnedObjects:
+                *outDataSize = SoundCastNull_DeviceOwnedObjects(deviceSlot, inAddress->mScope, inQualifierDataSize, inQualifierData,
+                                                                (AudioObjectID*)outData) * (UInt32)sizeof(AudioObjectID);
+                break;
             case kAudioDevicePropertyStreams:
                 // Output-scope only has this device's one stream; input
-                // scope (no input capability) and non-matching qualifiers
-                // (e.g. a request for controls) correctly have none.
-                // requiredSize already encodes all of that.
+                // scope (no input capability) has none. requiredSize
+                // already encodes that.
                 if (requiredSize == 0) { *outDataSize = 0; }
                 else { *(AudioObjectID*)outData = deviceSlot->streamID; *outDataSize = sizeof(AudioObjectID); }
                 break;
             case kAudioObjectPropertyControlList:
-                *outDataSize = 0; break;
+                ((AudioObjectID*)outData)[0] = deviceSlot->volumeControlID;
+                ((AudioObjectID*)outData)[1] = deviceSlot->muteControlID;
+                *outDataSize = 2 * sizeof(AudioObjectID); break;
             case kAudioDevicePropertyDeviceIsAlive:
                 *(UInt32*)outData = 1; *outDataSize = sizeof(UInt32); break;
             case kAudioDevicePropertyDeviceCanBeDefaultDevice:
@@ -652,6 +774,40 @@ static OSStatus SoundCastNull_GetPropertyData(AudioServerPlugInDriverRef inDrive
                 ((AudioValueRange*)outData)->mMinimum = kDeviceSampleRate;
                 ((AudioValueRange*)outData)->mMaximum = kDeviceSampleRate;
                 *outDataSize = sizeof(AudioValueRange); break;
+            default: break;
+        }
+    } else if (volumeSlot != NULL || muteSlot != NULL) {
+        SoundCastDeviceSlot* owner = volumeSlot != NULL ? volumeSlot : muteSlot;
+        switch (sel) {
+            case kAudioObjectPropertyBaseClass:
+                *(AudioClassID*)outData = volumeSlot != NULL ? kAudioLevelControlClassID : kAudioBooleanControlClassID;
+                *outDataSize = sizeof(AudioClassID); break;
+            case kAudioObjectPropertyClass:
+                *(AudioClassID*)outData = volumeSlot != NULL ? kAudioVolumeControlClassID : kAudioMuteControlClassID;
+                *outDataSize = sizeof(AudioClassID); break;
+            case kAudioObjectPropertyOwner:
+                *(AudioObjectID*)outData = owner->deviceID; *outDataSize = sizeof(AudioObjectID); break;
+            case kAudioObjectPropertyOwnedObjects:
+                *outDataSize = 0; break;
+            case kAudioControlPropertyScope:
+                *(AudioObjectPropertyScope*)outData = kAudioObjectPropertyScopeOutput; *outDataSize = sizeof(UInt32); break;
+            case kAudioControlPropertyElement:
+                *(AudioObjectPropertyElement*)outData = kAudioObjectPropertyElementMain; *outDataSize = sizeof(UInt32); break;
+            case kAudioBooleanControlPropertyValue:
+                *(UInt32*)outData = atomic_load(&owner->muted) ? 1 : 0; *outDataSize = sizeof(UInt32); break;
+            case kAudioLevelControlPropertyScalarValue:
+                *(Float32*)outData = SoundCastNull_VolumeScalar(owner); *outDataSize = sizeof(Float32); break;
+            case kAudioLevelControlPropertyDecibelValue:
+                *(Float32*)outData = SoundCastNull_ScalarToDB(SoundCastNull_VolumeScalar(owner)); *outDataSize = sizeof(Float32); break;
+            case kAudioLevelControlPropertyDecibelRange:
+                ((AudioValueRange*)outData)->mMinimum = kVolumeMinDB;
+                ((AudioValueRange*)outData)->mMaximum = 0;
+                *outDataSize = sizeof(AudioValueRange); break;
+            case kAudioLevelControlPropertyConvertScalarToDecibels:
+                // In/out: the caller's value arrives in outData.
+                *(Float32*)outData = SoundCastNull_ScalarToDB(*(Float32*)outData); *outDataSize = sizeof(Float32); break;
+            case kAudioLevelControlPropertyConvertDecibelsToScalar:
+                *(Float32*)outData = SoundCastNull_DBToScalar(*(Float32*)outData); *outDataSize = sizeof(Float32); break;
             default: break;
         }
     } else if (streamSlot != NULL) {
@@ -701,6 +857,36 @@ static OSStatus SoundCastNull_SetPropertyData(AudioServerPlugInDriverRef inDrive
             AudioObjectPropertyAddress changed = { kAudioDevicePropertyBufferFrameSize,
                                                    kAudioObjectPropertyScopeGlobal,
                                                    kAudioObjectPropertyElementMain };
+            gHost->PropertiesChanged(gHost, inObjectID, 1, &changed);
+        }
+        return noErr;
+    }
+
+    SoundCastDeviceSlot* volumeSlot = SoundCastNull_FindSlotByVolumeID(inObjectID);
+    if (volumeSlot != NULL && inDataSize == sizeof(Float32)
+        && (inAddress->mSelector == kAudioLevelControlPropertyScalarValue
+            || inAddress->mSelector == kAudioLevelControlPropertyDecibelValue)) {
+        Float32 value = *(const Float32*)inData;
+        Float32 scalar = inAddress->mSelector == kAudioLevelControlPropertyScalarValue ? value : SoundCastNull_DBToScalar(value);
+        Float32 previous = SoundCastNull_VolumeScalar(volumeSlot);
+        SoundCastNull_SetVolumeScalar(volumeSlot, scalar);
+        if (previous != SoundCastNull_VolumeScalar(volumeSlot) && gHost != NULL) {
+            AudioObjectPropertyAddress changed[2] = {
+                { kAudioLevelControlPropertyScalarValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+                { kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+            };
+            gHost->PropertiesChanged(gHost, inObjectID, 2, changed);
+        }
+        return noErr;
+    }
+
+    SoundCastDeviceSlot* muteSlot = SoundCastNull_FindSlotByMuteID(inObjectID);
+    if (muteSlot != NULL && inAddress->mSelector == kAudioBooleanControlPropertyValue && inDataSize == sizeof(UInt32)) {
+        UInt32 value = *(const UInt32*)inData ? 1 : 0;
+        UInt32 previous = atomic_exchange(&muteSlot->muted, value);
+        if (previous != value && gHost != NULL) {
+            AudioObjectPropertyAddress changed = { kAudioBooleanControlPropertyValue,
+                                                   kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
             gHost->PropertiesChanged(gHost, inObjectID, 1, &changed);
         }
         return noErr;
@@ -790,7 +976,7 @@ static OSStatus SoundCastNull_DoIOOperation(AudioServerPlugInDriverRef inDriver,
     if (inOperationID == kAudioServerPlugInIOOperationWriteMix && ioMainBuffer != NULL) {
         SoundCastDeviceSlot* slot = SoundCastNull_FindSlotByDeviceID(inDeviceObjectID);
         if (slot != NULL) {
-            SoundCastNull_WriteFrames(slot, (const float*)ioMainBuffer, inIOBufferFrameSize);
+            SoundCastNull_WriteFrames(slot, (float*)ioMainBuffer, inIOBufferFrameSize);
         }
     }
     return noErr;

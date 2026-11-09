@@ -19,6 +19,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sigtermSource = source
     }
 
+    /// Last stop on every quit path (also after the async shutdown):
+    /// give the Mac its previous output back.
+    @MainActor
+    func applicationWillTerminate(_ notification: Notification) {
+        Self.appState?.restoreSystemOutput()
+    }
+
     /// Set once shutdown has run (or timed out), so the re-issued
     /// terminate goes straight through.
     @MainActor private var readyToQuit = false

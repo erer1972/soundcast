@@ -113,6 +113,7 @@ final class AppState: ObservableObject {
     /// Bonjour instance name per AirPlay device ID, for resolving.
     private var airplayServiceNames: [String: String] = [:]
     private var sonosReceiversByDeviceID: [String: SonosReceiver] = [:]
+    private var discoveredAirPlayReceivers: [AirPlayReceiver] = []
     /// One PTP grandmaster for every AirPlay session (UDP 319/320 can
     /// only be bound once). Created on first use, stopped when idle.
     private var ptpClock: AirPlayPTPClock?
@@ -124,25 +125,23 @@ final class AppState: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     init() {
+        // A previous run that switched the output and then crashed.
+        restoreSystemOutput()
         airPlayDiscovery.$receivers
             .sink { [weak self] receivers in
+                guard let self else { return }
                 for receiver in receivers {
-                    self?.airplayServiceNames["airplay:\(receiver.id)"] = receiver.name
+                    self.airplayServiceNames["airplay:\(receiver.id)"] = receiver.name
                 }
-                self?.airplayDevices = receivers.map { receiver in
-                    SoundDevice(
-                        id: "airplay:\(receiver.id)",
-                        name: receiver.name,
-                        category: .airplay,
-                        audioObjectID: nil
-                    )
-                }
+                self.discoveredAirPlayReceivers = receivers
+                self.updateAirPlayDevices()
             }
             .store(in: &cancellables)
         sonosDiscovery.$receivers
             .sink { [weak self] receivers in
                 guard let self else { return }
                 self.sonosReceiversByDeviceID = Dictionary(uniqueKeysWithValues: receivers.map { ("sonos:\($0.id)", $0) })
+                defer { self.updateAirPlayDevices() }
                 self.sonosDevices = receivers.map { receiver in
                     SoundDevice(
                         id: "sonos:\(receiver.id)",
@@ -287,6 +286,42 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Publishes AirPlay receivers, leaving out Sonos speakers (by their
+    /// AirPlay "manufacturer" field, or matched against Sonos discovery):
+    /// those play through the Sonos (UPnP) path, which needs no pairing,
+    /// while their AirPlay side would ask for a PIN they can't display.
+    /// A hidden entry that was ticked is unticked.
+    private func updateAirPlayDevices() {
+        let sonosMACs = Set(sonosReceiversByDeviceID.values.compactMap { Self.sonosMAC(fromID: $0.id) })
+        let sonosNames = Set(sonosReceiversByDeviceID.values.map(\.name))
+        let visible = discoveredAirPlayReceivers.filter { receiver in
+            receiver.manufacturer?.caseInsensitiveCompare("Sonos") != .orderedSame
+                && !sonosMACs.contains(Self.normalizedMAC(receiver.id)) && !sonosNames.contains(receiver.name)
+        }
+        airplayDevices = visible.map { receiver in
+            SoundDevice(id: "airplay:\(receiver.id)", name: receiver.name, category: .airplay, audioObjectID: nil)
+        }
+        let visibleIDs = Set(airplayDevices.map(\.id))
+        for source in Self.allSources {
+            let hidden = (selectedDeviceIDsBySource[source] ?? []).filter { $0.hasPrefix("airplay:") && !visibleIDs.contains($0) }
+            guard !hidden.isEmpty else { continue }
+            selectedDeviceIDsBySource[source]?.subtract(hidden)
+            if isActive(source) { applySelectionToRunningOutput(for: source) }
+        }
+    }
+
+    /// "RINCON_804AF2D0F61A01400" -> "804AF2D0F61A".
+    private static func sonosMAC(fromID id: String) -> String? {
+        guard id.hasPrefix("RINCON_") else { return nil }
+        let hex = id.dropFirst(7).prefix(12)
+        return hex.count == 12 ? hex.uppercased() : nil
+    }
+
+    /// "80:4A:F2:D0:F6:1A" -> "804AF2D0F61A".
+    private static func normalizedMAC(_ value: String) -> String {
+        value.replacingOccurrences(of: ":", with: "").replacingOccurrences(of: "-", with: "").uppercased()
+    }
+
     var groupedDevices: [(SoundDevice.Category, [SoundDevice])] {
         let all = localDevices + airplayDevices + sonosDevices
         let grouped = Dictionary(grouping: all, by: \.category)
@@ -351,9 +386,45 @@ final class AppState: ObservableObject {
     func setActive(_ source: CastSource, on: Bool) {
         guard isActive(source) != on else { return }
         if on {
+            // Route the Mac's sound into the virtual device first: playing
+            // to it is also what makes the driver create its shared buffer.
+            if case .virtualDevice(let preset) = source { switchSystemOutput(to: preset) }
             startSession(source)
+            if !isActive(source) { restoreSystemOutput() }
         } else {
             stopSession(source)
+            if case .virtualDevice = source { restoreSystemOutput() }
+        }
+    }
+
+    // MARK: - System output switching
+
+    /// UID of the output that was selected before SoundCast took over.
+    /// Kept in UserDefaults so a crash can be undone on the next launch.
+    private static let savedSystemOutputKey = "SavedSystemOutputUID"
+
+    private func switchSystemOutput(to preset: VirtualDevicePreset) {
+        guard let current = SystemOutputDevice.currentUID(), current != preset.deviceUID else { return }
+        if !current.hasPrefix("com.soundcast.device") {
+            UserDefaults.standard.set(current, forKey: Self.savedSystemOutputKey)
+        }
+        if SystemOutputDevice.select(uid: preset.deviceUID) {
+            NSLog("[SoundCast][AppState] system output switched to \(preset.displayName) (was \(current))")
+        } else {
+            NSLog("[SoundCast][AppState] could not switch system output to \(preset.displayName)")
+        }
+    }
+
+    /// Puts back the output saved by `switchSystemOutput`, unless the user
+    /// has picked a different output themselves in the meantime.
+    func restoreSystemOutput() {
+        guard let saved = UserDefaults.standard.string(forKey: Self.savedSystemOutputKey) else { return }
+        UserDefaults.standard.removeObject(forKey: Self.savedSystemOutputKey)
+        guard SystemOutputDevice.currentUID()?.hasPrefix("com.soundcast.device") == true else { return }
+        if SystemOutputDevice.select(uid: saved) {
+            NSLog("[SoundCast][AppState] system output restored to \(saved)")
+        } else {
+            NSLog("[SoundCast][AppState] could not restore system output \(saved) (no longer available?)")
         }
     }
 
@@ -393,11 +464,12 @@ final class AppState: ObservableObject {
     }
 
     private func attemptStart(_ source: CastSource) -> StartOutcome {
-        // ~2s of 48kHz stereo float32 — generous headroom for the
+        // ~5s of 48kHz stereo float32 — headroom for the
         // capture-to-render handoff; Phase 2/3 consumers (AirPlay
         // senders, Sonos stream) get their own, separately-sized ring
         // buffers fed from the same capture callback, per design doc §6.
-        let buffer = RingBuffer(capacitySamples: 48_000 * 2 * 2)
+        // Holds the AirPlay alignment delay (2 s) for local outputs plus headroom.
+        let buffer = RingBuffer(capacitySamples: 48_000 * 2 * 5)
 
         let captureEngine: AudioCaptureSource = switch source {
         case .globalTap: ProcessTapCapture(ringBuffer: buffer)
@@ -408,6 +480,7 @@ final class AppState: ObservableObject {
 
         do {
             try captureEngine.start()
+            outputEngine.sourceSampleRate = captureEngine.sampleRate
             runningSessions[source] = RunningSession(ringBuffer: buffer, capture: captureEngine, output: outputEngine)
             do {
                 try applySelection(on: outputEngine, for: source)
@@ -475,6 +548,10 @@ final class AppState: ObservableObject {
             outputEngine.stop()
             return
         }
+        // AirPlay rooms play a fixed time after capture; hold local
+        // outputs back by the same amount so every room is in step.
+        outputEngine.alignmentDelaySeconds = selected.contains { $0.hasPrefix("airplay:") }
+            ? AirPlayRealtimeSender.playbackLatencySeconds : 0
         try outputEngine.reconfigure(targets: targets)
     }
 
