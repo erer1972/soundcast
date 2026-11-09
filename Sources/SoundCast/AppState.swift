@@ -214,10 +214,10 @@ final class AppState: ObservableObject {
                 .sink { [weak self] devices in
                     guard let self else { return }
                     NSLog("[SoundCast][AppState] --cast-airplay: casting everything to \"\(roomNameList)\"")
-                    for device in devices where self.selectedDeviceIDsBySource[.globalTap]?.contains(device.id) != true {
-                        self.toggleDevice(device, for: .globalTap)
+                    for device in devices where self.selectedDeviceIDsBySource[Self.mainSource]?.contains(device.id) != true {
+                        self.toggleDevice(device, for: Self.mainSource)
                     }
-                    self.setActive(.globalTap, on: true)
+                    self.setCasting(true)
                 }
                 .store(in: &cancellables)
         }
@@ -237,7 +237,7 @@ final class AppState: ObservableObject {
                     for device in devices where self.selectedDeviceIDsBySource[source]?.contains(device.id) != true {
                         self.toggleDevice(device, for: source)
                     }
-                    self.setActive(source, on: true)
+                    self.setCasting(true)
                 }
                 .store(in: &cancellables)
         }
@@ -250,24 +250,48 @@ final class AppState: ObservableObject {
     /// True while any source is on (including ones still waiting for the driver).
     var isCasting: Bool { !activeSources.isEmpty }
 
-    /// What the panel's master switch turns back on after being switched off.
-    private var resumeSources: Set<CastSource> = [.virtualDevice(.main)]
+    /// The one "Casting" switch. Rooms and volumes live under `mainSource`.
+    /// Casting normally runs through the SoundCast device; if its driver is
+    /// missing or out of date it falls back to capturing all Mac audio
+    /// (`.globalTap`, with the same rooms) so casting still works.
+    static let mainSource: CastSource = .virtualDevice(.main)
 
-    /// The panel's single master switch: off stops every source (remembering
-    /// which was on); on restores it, or "SoundCast" the first time.
+    /// Why casting runs through the fallback capture, or nil when it doesn't.
+    @Published private(set) var fallbackReason: String?
+
+    /// The source actually running (or about to), for status and errors.
+    var castingSource: CastSource { activeSources.first ?? Self.mainSource }
+
     func setCasting(_ on: Bool) {
         if on {
             guard !isCasting else { return }
-            for source in Self.allSources where resumeSources.contains(source) {
-                setActive(source, on: true)
+            if SystemOutputDevice.exists(uid: VirtualDevicePreset.main.deviceUID) {
+                setActive(Self.mainSource, on: true)
+            } else {
+                startFallback(reason: "The SoundCast driver isn't installed")
             }
         } else {
-            guard isCasting else { return }
-            resumeSources = activeSources
             for source in Self.allSources where isActive(source) {
                 setActive(source, on: false)
             }
+            fallbackReason = nil
         }
+    }
+
+    private func startFallback(reason: String) {
+        NSLog("[SoundCast][AppState] casting via all-audio capture: \(reason)")
+        if isActive(Self.mainSource) { setActive(Self.mainSource, on: false) }
+        fallbackReason = reason
+        mirrorSelectionToFallback()
+        setActive(.globalTap, on: true)
+    }
+
+    /// While the fallback runs, it plays the rooms chosen under `mainSource`.
+    private func mirrorSelectionToFallback() {
+        guard fallbackReason != nil else { return }
+        selectedDeviceIDsBySource[.globalTap] = selectedDeviceIDsBySource[Self.mainSource]
+        perDeviceGainBySource[.globalTap] = perDeviceGainBySource[Self.mainSource]
+        if isActive(.globalTap) { applySelectionToRunningOutput(for: .globalTap) }
     }
 
     /// Devices ticked for one source, in list order.
@@ -422,19 +446,13 @@ final class AppState: ObservableObject {
         if selected.contains(device.id) {
             selected.remove(device.id)
         } else {
-            // A receiver plays one sender at a time; a second session from
-            // another source would just kick the first one off.
-            if device.category == .airplay || device.category == .sonos,
-               let other = Self.allSources.first(where: { $0 != source && selectedDeviceIDsBySource[$0]?.contains(device.id) == true }) {
-                lastErrorBySource[source] = "\(device.name) is already used by \"\(other.displayName)\"."
-                return
-            }
             selected.insert(device.id)
         }
         selectedDeviceIDsBySource[source] = selected
         if isActive(source) {
             applySelectionToRunningOutput(for: source)
         }
+        if source == Self.mainSource { mirrorSelectionToFallback() }
     }
 
     func setGain(for device: SoundDevice, source: CastSource, gain: Float) {
@@ -443,6 +461,25 @@ final class AppState: ObservableObject {
         airplayCasts[source]?[device.id]?.sender?.setVolume(gain * masterVolume)
         if sonosCasts[source]?[device.id] != nil {
             scheduleSonosVolume(deviceID: device.id, source: source)
+        }
+        if source == Self.mainSource, fallbackReason != nil {
+            setGain(for: device, source: .globalTap, gain: gain)
+        }
+    }
+
+    /// Extra delay (ms, may be negative) added to the latency reported to
+    /// video players only, to fine-tune lip sync by eye.
+    @Published private(set) var videoSyncMilliseconds: Double =
+        UserDefaults.standard.double(forKey: "VideoSyncMilliseconds")
+
+    func setVideoSync(milliseconds: Double) {
+        let value = max(-500, min(500, milliseconds.rounded()))
+        guard value != videoSyncMilliseconds else { return }
+        videoSyncMilliseconds = value
+        UserDefaults.standard.set(value, forKey: "VideoSyncMilliseconds")
+        for source in Self.allSources where isActive(source) {
+            guard let session = runningSessions[source] else { continue }
+            publishLatency(for: source, outputEngine: session.output, selected: selectedDeviceIDsBySource[source] ?? [])
         }
     }
 
@@ -665,12 +702,22 @@ final class AppState: ObservableObject {
             lastErrorBySource[source] = outdatedDriverSources.contains(source)
                 ? "Waiting for the updated SoundCast driver — play something to \"\(source.displayName)\". If this stays, reinstall the driver."
                 : "Waiting for audio to be played to \"\(source.displayName)\"…"
+            let waitStarted = Date()
             retryTasks[source] = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     guard let self, !Task.isCancelled else { return }
                     switch self.attemptStart(source) {
                     case .waitingForDriver:
+                        // An old driver's buffer that the new driver hasn't
+                        // replaced within a few seconds means the installed
+                        // driver is out of date: keep casting via the fallback.
+                        if source == Self.mainSource, self.outdatedDriverSources.contains(source),
+                           Date().timeIntervalSince(waitStarted) > 3 {
+                            self.retryTasks[source] = nil
+                            self.startFallback(reason: "The SoundCast driver is out of date — reinstall it")
+                            return
+                        }
                         continue
                     case .started:
                         self.retryTasks[source] = nil

@@ -88,7 +88,7 @@ struct MenuBarContentView: View {
 
             Divider()
 
-            Text("One source at a time: \"Cast Everything\" sends all Mac audio; \"SoundCast\" sends what plays to the SoundCast output (turning it on selects that output for you).")
+            Text("Plays what your Mac plays in the rooms you tick. While casting, the Mac's sound output is set to SoundCast.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 
@@ -97,9 +97,7 @@ struct MenuBarContentView: View {
             // content, capped at what fits on screen.
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(AppState.allSources, id: \.self) { source in
-                        SourceSection(source: source, state: state)
-                    }
+                    CastingSection(state: state)
                 }
                 .background(GeometryReader { proxy in
                     Color.clear.preference(key: SourceListHeightKey.self, value: proxy.size.height)
@@ -166,22 +164,19 @@ private struct SourceListHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
-/// One source (global tap, or one virtual-device preset): its own
-/// on/off toggle plus, while expanded, its own device checklist —
-/// entirely independent of every other source's state.
-private struct SourceSection: View {
-    let source: AppState.CastSource
+/// The one "Casting" switch and the room list (stored under
+/// `AppState.mainSource`, also used by the fallback capture).
+private struct CastingSection: View {
     @ObservedObject var state: AppState
-    @State private var isExpanded = false
-
-    var isActive: Bool { state.isActive(source) }
+    @State private var isExpanded = true
+    private let source = AppState.mainSource
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Toggle(source.displayName, isOn: Binding(
-                    get: { isActive },
-                    set: { state.setActive(source, on: $0) }
+                Toggle("Casting", isOn: Binding(
+                    get: { state.isCasting },
+                    set: { state.setCasting($0) }
                 ))
                 .toggleStyle(.switch)
 
@@ -193,18 +188,20 @@ private struct SourceSection: View {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                 }
                 .buttonStyle(.plain)
+                .help(isExpanded ? "Hide rooms" : "Show rooms")
             }
 
-            if let error = state.lastErrorBySource[source] {
+            if let error = state.lastErrorBySource[state.castingSource] {
                 Text(error)
                     .font(.caption2)
                     .foregroundStyle(.red)
             }
 
-            if case .virtualDevice = source, isExpanded || isActive {
-                Text("Point one app's output at \"\(source.displayName)\" (its own output picker, or System Settings → Sound) to route just that app here.")
+            if let reason = state.fallbackReason {
+                Text("\(reason). Casting all Mac audio instead — volume keys and video lip sync need the driver.")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if isExpanded {

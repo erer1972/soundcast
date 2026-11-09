@@ -155,29 +155,23 @@ struct WidgetPanelView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
-                    SectionLabel("Sources")
-                    ForEach(AppState.allSources, id: \.self) { source in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Toggle(source.displayName, isOn: Binding(
-                                get: { state.isActive(source) },
-                                set: { state.setActive(source, on: $0) }
-                            ))
-                            .toggleStyle(.switch)
-                            .controlSize(.small)
-                            .font(.system(size: 13, weight: .medium))
-                            if let error = state.lastErrorBySource[source] {
-                                Text(error)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(state.isActive(source) ? Color.secondary : Color.red)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
+                    if let error = state.lastErrorBySource[state.castingSource] {
+                        Text(error)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let reason = state.fallbackReason {
+                        Text("\(reason). Casting all Mac audio instead.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     ForEach(AppState.allSources.filter { state.isActive($0) }, id: \.self) { source in
                         let devices = state.selectedDevices(for: source)
                         if !devices.isEmpty {
-                            SectionLabel("Devices · \(source.displayName)")
+                            SectionLabel("Rooms")
                             ForEach(devices) { device in
                                 VStack(alignment: .leading, spacing: 0) {
                                     HStack {
