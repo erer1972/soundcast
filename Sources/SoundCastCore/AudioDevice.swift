@@ -154,6 +154,26 @@ public enum SystemOutputDevice {
         return value as String
     }
 
+    public static func exists(uid: String) -> Bool { deviceID(forUID: uid) != nil }
+
+    private static func deviceID(forUID uid: String) -> AudioObjectID? {
+        var translate = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var cfUID = uid as CFString
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        let status = withUnsafeMutablePointer(to: &cfUID) { uidPointer in
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &translate,
+                UInt32(MemoryLayout<CFString>.size), uidPointer, &size, &deviceID
+            )
+        }
+        return status == noErr && deviceID != kAudioObjectUnknown ? deviceID : nil
+    }
+
     /// Returns false if no device has that UID (e.g. a Bluetooth speaker
     /// that has since disconnected) or Core Audio refused the change.
     @discardableResult
