@@ -183,11 +183,21 @@ struct WidgetPanelView: View {
                                             .background(.white.opacity(0.12), in: Capsule())
                                             .foregroundStyle(.secondary)
                                         Spacer()
-                                        if let status = state.airplayStatus[device.id] {
+                                        if let status = state.airplayStatus[device.id] ?? state.sonosStatus[device.id] {
                                             Text(status)
                                                 .font(.system(size: 10.5))
-                                                .foregroundStyle(.secondary)
+                                                .foregroundStyle(status == "Failed" || status == "Volume update failed" ? .red : .secondary)
                                                 .lineLimit(1)
+                                        }
+                                        if device.category == .sonos,
+                                                         (state.sonosStatus[device.id] == "Failed" || state.sonosStatus[device.id] == "Not found on the network") {
+                                            Button {
+                                                state.retrySonos(deviceID: device.id, source: source)
+                                            } label: {
+                                                Image(systemName: "arrow.clockwise")
+                                            }
+                                            .buttonStyle(.plain)
+                                            .help("Retry Sonos connection")
                                         }
                                     }
                                     Slider(

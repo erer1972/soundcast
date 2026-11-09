@@ -62,14 +62,14 @@ if args.first == "--sonos-server-start-probe" {
     do {
         for _ in 0..<2 {
             do {
-                _ = try server.start(peerIPv4: "invalid")
+                _ = try await server.start(peerIPv4: "invalid")
                 server.stop()
                 print("FAIL: accepted an invalid receiver address.")
                 exit(1)
             } catch SonosHTTPAudioServer.ServerError.invalidPeerAddress {
             }
         }
-        let url = try server.start(peerIPv4: "127.0.0.1")
+        let url = try await server.start(peerIPv4: "127.0.0.1")
         defer { server.stop() }
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
@@ -160,7 +160,12 @@ let sonosWAVMode = args.first == "--sonos-wav"
 if sonosMode { args.removeFirst() }
 let airplayTargetName = dualCastMode && !args.isEmpty ? args.removeFirst() : nil
 let sonosTargetName = (sonosLiveMode || sonosVolumeMode) && !args.isEmpty ? args.removeFirst() : nil
-let requestedSonosVolume = sonosVolumeMode && !args.isEmpty ? Int(args[0]) : nil
+let rawSonosVolume = sonosVolumeMode ? args.first : nil
+let requestedSonosVolume = rawSonosVolume.flatMap(Int.init)
+if let rawSonosVolume, requestedSonosVolume == nil || !(0...100).contains(requestedSonosVolume!) {
+    print("FAIL: Sonos volume must be an integer from 0 to 100 (got \(rawSonosVolume)).")
+    exit(1)
+}
 let durationSeconds = sonosVolumeMode ? 4.0 : (args.first.flatMap(Double.init) ?? 8.0)
 let sonosDelaySeconds = dualCastMode && args.count > 1 ? (Double(args[1]) ?? 0) : 0
 let startupStopDelay = sonosStartStopProbe && args.count > 1 ? Int(args[1]) : 5
@@ -426,7 +431,7 @@ if sonosMode {
                         }
                         let silence = RingBuffer(capacitySamples: 48_000 * 4)
                         let alternateServer = SonosHTTPAudioServer(source: silence, sampleRate: 48_000)
-                        let alternateURI = try alternateServer.start(peerIPv4: peerIPv4)
+                        let alternateURI = try await alternateServer.start(peerIPv4: peerIPv4)
                         defer { alternateServer.stop() }
                         do {
                             try await SonosUPnPClient.setAVTransportURI(for: receiver, uri: alternateURI)

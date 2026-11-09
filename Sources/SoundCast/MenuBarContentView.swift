@@ -137,11 +137,8 @@ private struct DeviceRow: View {
     @ObservedObject var state: AppState
 
     var isSelected: Bool { state.selectedDeviceIDsBySource[source]?.contains(device.id) ?? false }
-    // Sonos entries are discovered but not yet wired to any output —
-    // show them, but don't let the user tick a box that would silently
-    // do nothing. AirPlay rooms stream via AirPlayRealtimeSender.
-    var isInteractive: Bool { device.category != .sonos }
-    var airplayStatus: String? { device.category == .airplay ? state.airplayStatus[device.id] : nil }
+    var isInteractive: Bool { true }
+    var deviceStatus: String? { state.airplayStatus[device.id] ?? state.sonosStatus[device.id] }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -153,8 +150,8 @@ private struct DeviceRow: View {
                         Image(systemName: isSelected ? "checkmark.square.fill" : "square")
                         Text(device.name)
                         Spacer()
-                        if let airplayStatus {
-                            Text(airplayStatus)
+                        if let deviceStatus {
+                            Text(deviceStatus)
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
@@ -187,6 +184,21 @@ private struct DeviceRow: View {
                     ),
                     in: 0...1
                 )
+                .padding(.leading, 22)
+            }
+
+            if isSelected, device.category == .sonos,
+                    (state.sonosStatus[device.id] == "Failed" || state.sonosStatus[device.id] == "Not found on the network") {
+                HStack {
+                    Spacer()
+                    Button {
+                        state.retrySonos(deviceID: device.id, source: source)
+                    } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                    }
+                    .font(.caption2)
+                    .buttonStyle(.plain)
+                }
                 .padding(.leading, 22)
             }
         }

@@ -66,6 +66,13 @@ final class AppState: ObservableObject {
         init(mirror: RingBuffer) { self.mirror = mirror }
     }
 
+    /// One Sonos S1 receiver attached to a running capture source.
+    private final class SonosCast {
+        let streamer: SonosAudioStreamer
+        var startTask: Task<Void, Never>?
+        init(streamer: SonosAudioStreamer) { self.streamer = streamer }
+    }
+
     @Published var activeSources: Set<CastSource> = []
     @Published var selectedDeviceIDsBySource: [CastSource: Set<String>] = [:]
     @Published var perDeviceGainBySource: [CastSource: [String: Float]] = [:]
@@ -80,6 +87,7 @@ final class AppState: ObservableObject {
     @Published var lastErrorBySource: [CastSource: String] = [:]
     /// Per AirPlay device: "Connecting…", "Playing", or an error message.
     @Published var airplayStatus: [String: String] = [:]
+    @Published var sonosStatus: [String: String] = [:]
     /// AirPlay devices that failed pair-verify (show a "Pair…" button).
     @Published var unpairedAirPlayDevices: Set<String> = []
 
@@ -97,16 +105,20 @@ final class AppState: ObservableObject {
 
     private var runningSessions: [CastSource: RunningSession] = [:]
     private var airplayCasts: [CastSource: [String: AirPlayCast]] = [:]
+    private var sonosCasts: [CastSource: [String: SonosCast]] = [:]
+    private var sonosVolumeTasks: [String: Task<Void, Never>] = [:]
+    private var sonosVolumeGeneration: [String: Int] = [:]
+    private var sonosStopTasks: [String: Task<Void, Never>] = [:]
+    private var sonosStopGeneration: [String: UUID] = [:]
     /// Bonjour instance name per AirPlay device ID, for resolving.
     private var airplayServiceNames: [String: String] = [:]
+    private var sonosReceiversByDeviceID: [String: SonosReceiver] = [:]
     /// One PTP grandmaster for every AirPlay session (UDP 319/320 can
     /// only be bound once). Created on first use, stopped when idle.
     private var ptpClock: AirPlayPTPClock?
     private let airplayIdentity = AirPlayIdentity.loadOrCreate()
 
-    // Bonjour discovery feeds the grouped AirPlay list; selected receivers
-    // are handled by AirPlayRealtimeSender. Sonos-specific output remains
-    // unimplemented.
+    // Bonjour discovery feeds the grouped network-device lists.
     private let airPlayDiscovery = AirPlayDiscovery()
     private let sonosDiscovery = SonosDiscovery()
     private var cancellables: Set<AnyCancellable> = []
@@ -129,13 +141,25 @@ final class AppState: ObservableObject {
             .store(in: &cancellables)
         sonosDiscovery.$receivers
             .sink { [weak self] receivers in
-                self?.sonosDevices = receivers.map { receiver in
+                guard let self else { return }
+                self.sonosReceiversByDeviceID = Dictionary(uniqueKeysWithValues: receivers.map { ("sonos:\($0.id)", $0) })
+                self.sonosDevices = receivers.map { receiver in
                     SoundDevice(
                         id: "sonos:\(receiver.id)",
                         name: receiver.name,
                         category: .sonos,
                         audioObjectID: nil
                     )
+                }
+                for receiver in receivers {
+                    let deviceID = "sonos:\(receiver.id)"
+                    Task { [weak self] in
+                        guard let self, let volume = try? await SonosUPnPClient.getVolume(for: receiver),
+                              self.sonosReceiversByDeviceID[deviceID]?.id == receiver.id else { return }
+                        for source in Self.allSources where self.perDeviceGainBySource[source]?[deviceID] == nil {
+                            self.perDeviceGainBySource[source, default: [:]][deviceID] = Float(volume) / 100
+                        }
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -149,34 +173,59 @@ final class AppState: ObservableObject {
     /// and tick those rooms once Bonjour has found all of them.
     private func setUpLaunchArgumentCasting() {
         let arguments = CommandLine.arguments
-        var roomNames = Set<String>()
+        var airPlayRoomNames = Set<String>()
+        var sonosRoomNames = Set<String>()
         var index = 0
         while index + 1 < arguments.count {
             if arguments[index] == "--cast-airplay" {
-                roomNames.insert(arguments[index + 1])
+                airPlayRoomNames.insert(arguments[index + 1])
+                index += 2
+            } else if arguments[index] == "--cast-sonos" {
+                sonosRoomNames.insert(arguments[index + 1])
                 index += 2
             } else {
                 index += 1
             }
         }
-        guard !roomNames.isEmpty else { return }
-        let roomNameList = roomNames.sorted().joined(separator: ", ")
-        NSLog("[SoundCast][AppState] --cast-airplay: waiting for \"\(roomNameList)\"")
-        $airplayDevices
-            .compactMap { devices -> [SoundDevice]? in
-                let matching = devices.filter { roomNames.contains($0.name) }
-                return Set(matching.map(\.name)) == roomNames ? matching : nil
-            }
-            .first()
-            .sink { [weak self] devices in
-                guard let self else { return }
-                NSLog("[SoundCast][AppState] --cast-airplay: casting everything to \"\(roomNameList)\"")
-                for device in devices where self.selectedDeviceIDsBySource[.globalTap]?.contains(device.id) != true {
-                    self.toggleDevice(device, for: .globalTap)
+        if !airPlayRoomNames.isEmpty {
+            let roomNameList = airPlayRoomNames.sorted().joined(separator: ", ")
+            NSLog("[SoundCast][AppState] --cast-airplay: waiting for \"\(roomNameList)\"")
+            $airplayDevices
+                .compactMap { devices -> [SoundDevice]? in
+                    let matching = devices.filter { airPlayRoomNames.contains($0.name) }
+                    return Set(matching.map(\.name)) == airPlayRoomNames ? matching : nil
                 }
-                self.setActive(.globalTap, on: true)
-            }
-            .store(in: &cancellables)
+                .first()
+                .sink { [weak self] devices in
+                    guard let self else { return }
+                    NSLog("[SoundCast][AppState] --cast-airplay: casting everything to \"\(roomNameList)\"")
+                    for device in devices where self.selectedDeviceIDsBySource[.globalTap]?.contains(device.id) != true {
+                        self.toggleDevice(device, for: .globalTap)
+                    }
+                    self.setActive(.globalTap, on: true)
+                }
+                .store(in: &cancellables)
+        }
+        if !sonosRoomNames.isEmpty {
+            let roomNameList = sonosRoomNames.sorted().joined(separator: ", ")
+            let source = CastSource.virtualDevice(.main)
+            NSLog("[SoundCast][AppState] --cast-sonos: waiting for \"\(roomNameList)\"")
+            $sonosDevices
+                .compactMap { devices -> [SoundDevice]? in
+                    let matching = devices.filter { sonosRoomNames.contains($0.name) }
+                    return Set(matching.map(\.name)) == sonosRoomNames ? matching : nil
+                }
+                .first()
+                .sink { [weak self] devices in
+                    guard let self else { return }
+                    NSLog("[SoundCast][AppState] --cast-sonos: casting SoundCast virtual audio to \"\(roomNameList)\"")
+                    for device in devices where self.selectedDeviceIDsBySource[source]?.contains(device.id) != true {
+                        self.toggleDevice(device, for: source)
+                    }
+                    self.setActive(source, on: true)
+                }
+                .store(in: &cancellables)
+        }
     }
 
     func isActive(_ source: CastSource) -> Bool { activeSources.contains(source) }
@@ -209,7 +258,7 @@ final class AppState: ObservableObject {
     /// Devices ticked for one source, in list order.
     func selectedDevices(for source: CastSource) -> [SoundDevice] {
         let selected = selectedDeviceIDsBySource[source] ?? []
-        return (localDevices + airplayDevices).filter { selected.contains($0.id) }
+        return (localDevices + airplayDevices + sonosDevices).filter { selected.contains($0.id) }
     }
 
     /// Every device currently receiving audio from any active source, de-duplicated.
@@ -253,7 +302,7 @@ final class AppState: ObservableObject {
         } else {
             // A receiver plays one sender at a time; a second session from
             // another source would just kick the first one off.
-            if device.category == .airplay,
+            if device.category == .airplay || device.category == .sonos,
                let other = Self.allSources.first(where: { $0 != source && selectedDeviceIDsBySource[$0]?.contains(device.id) == true }) {
                 lastErrorBySource[source] = "\(device.name) is already used by \"\(other.displayName)\"."
                 return
@@ -270,6 +319,9 @@ final class AppState: ObservableObject {
         perDeviceGainBySource[source, default: [:]][device.id] = gain
         runningSessions[source]?.output.setGain(deviceID: device.id, gain: gain)
         airplayCasts[source]?[device.id]?.sender?.setVolume(gain * masterVolume)
+        if sonosCasts[source]?[device.id] != nil {
+            scheduleSonosVolume(deviceID: device.id, source: source)
+        }
     }
 
     func setMasterVolume(_ volume: Float) {
@@ -281,6 +333,9 @@ final class AppState: ObservableObject {
             for (deviceID, cast) in casts {
                 cast.sender?.setVolume((perDeviceGainBySource[source]?[deviceID] ?? 1.0) * volume)
             }
+        }
+        for (source, casts) in sonosCasts {
+            for deviceID in casts.keys { scheduleSonosVolume(deviceID: deviceID, source: source) }
         }
     }
 
@@ -360,6 +415,9 @@ final class AppState: ObservableObject {
                 for deviceID in Array(airplayCasts[source]?.keys ?? [:].keys) {
                     stopAirPlay(deviceID: deviceID, source: source)
                 }
+                for deviceID in Array(sonosCasts[source]?.keys ?? [:].keys) {
+                    stopSonos(deviceID: deviceID, source: source)
+                }
                 runningSessions[source] = nil
                 throw error
             }
@@ -387,6 +445,9 @@ final class AppState: ObservableObject {
         for deviceID in Array(airplayCasts[source]?.keys ?? [:].keys) {
             stopAirPlay(deviceID: deviceID, source: source)
         }
+        for deviceID in Array(sonosCasts[source]?.keys ?? [:].keys) {
+            stopSonos(deviceID: deviceID, source: source)
+        }
         runningSessions[source]?.stop()
         runningSessions[source] = nil
         activeSources.remove(source)
@@ -405,6 +466,7 @@ final class AppState: ObservableObject {
     private func applySelection(on outputEngine: LocalOutputEngine, for source: CastSource) throws {
         let selected = selectedDeviceIDsBySource[source] ?? []
         syncAirPlay(for: source, selected: selected)
+        syncSonos(for: source, selected: selected)
         let gains = perDeviceGainBySource[source] ?? [:]
         let targets = localDevices
             .filter { selected.contains($0.id) }
@@ -414,6 +476,122 @@ final class AppState: ObservableObject {
             return
         }
         try outputEngine.reconfigure(targets: targets)
+    }
+
+    // MARK: - Sonos S1
+
+    private func syncSonos(for source: CastSource, selected: Set<String>) {
+        let wanted = Set(selected.filter { $0.hasPrefix("sonos:") })
+        let current = Set(sonosCasts[source]?.keys ?? [:].keys)
+        for deviceID in current.subtracting(wanted) {
+            stopSonos(deviceID: deviceID, source: source)
+        }
+        for deviceID in wanted.subtracting(current) {
+            startSonos(deviceID: deviceID, source: source)
+        }
+    }
+
+    private func startSonos(deviceID: String, source: CastSource) {
+        guard let session = runningSessions[source] else { return }
+        guard let receiver = sonosReceiversByDeviceID[deviceID] else {
+            sonosStatus[deviceID] = "Not found on the network"
+            return
+        }
+        let streamer = SonosAudioStreamer(
+            receiver: receiver,
+            source: session.ringBuffer,
+            sampleRate: session.capture.sampleRate
+        )
+        let cast = SonosCast(streamer: streamer)
+        sonosCasts[source, default: [:]][deviceID] = cast
+        sonosStatus[deviceID] = "Connecting…"
+        let previousStop = sonosStopTasks[deviceID]
+
+        cast.startTask = Task { [weak self] in
+            guard let self else { return }
+            await previousStop?.value
+            guard !Task.isCancelled, self.sonosCasts[source]?[deviceID] === cast else { return }
+            do {
+                if let gain = self.perDeviceGainBySource[source]?[deviceID] {
+                    try await SonosUPnPClient.setVolume(
+                        self.volume(gain: gain * self.masterVolume), for: receiver
+                    )
+                }
+                try await streamer.start()
+                guard !Task.isCancelled, self.sonosCasts[source]?[deviceID] === cast else {
+                    await streamer.stop()
+                    return
+                }
+                self.sonosStatus[deviceID] = "Playing"
+                self.lastErrorBySource[source] = nil
+            } catch {
+                await streamer.stop()
+                guard self.sonosCasts[source]?[deviceID] === cast else { return }
+                self.sonosStatus[deviceID] = "Failed"
+                self.lastErrorBySource[source] = "Sonos \(receiver.name) failed: \(error)"
+                NSLog("[SoundCast][AppState] Sonos \(deviceID) failed: \(error)")
+            }
+        }
+    }
+
+    func retrySonos(deviceID: String, source: CastSource) {
+        guard selectedDeviceIDsBySource[source]?.contains(deviceID) == true,
+              (sonosStatus[deviceID] == "Failed" || sonosStatus[deviceID] == "Not found on the network") else { return }
+        lastErrorBySource[source] = nil
+        stopSonos(deviceID: deviceID, source: source)
+        startSonos(deviceID: deviceID, source: source)
+    }
+
+    private func stopSonos(deviceID: String, source: CastSource) {
+        guard let cast = sonosCasts[source]?.removeValue(forKey: deviceID) else { return }
+        if sonosCasts[source]?.isEmpty == true { sonosCasts[source] = nil }
+        sonosVolumeTasks.removeValue(forKey: deviceID)?.cancel()
+        sonosVolumeGeneration[deviceID, default: 0] += 1
+        sonosStatus[deviceID] = nil
+        cast.startTask?.cancel()
+        let previousStop = sonosStopTasks[deviceID]
+        let stopID = UUID()
+        sonosStopGeneration[deviceID] = stopID
+        let startTask = cast.startTask
+        let stopTask = Task { [weak self] in
+            await previousStop?.value
+            await startTask?.value
+            await cast.streamer.stop()
+            guard let self, self.sonosStopGeneration[deviceID] == stopID else { return }
+            self.sonosStopTasks[deviceID] = nil
+            self.sonosStopGeneration[deviceID] = nil
+        }
+        sonosStopTasks[deviceID] = stopTask
+    }
+
+    private func scheduleSonosVolume(deviceID: String, source: CastSource) {
+        guard let receiver = sonosReceiversByDeviceID[deviceID],
+              let gain = perDeviceGainBySource[source]?[deviceID] else { return }
+        sonosVolumeTasks.removeValue(forKey: deviceID)?.cancel()
+        let generation = sonosVolumeGeneration[deviceID, default: 0] + 1
+        sonosVolumeGeneration[deviceID] = generation
+        let desiredVolume = volume(gain: gain * masterVolume)
+        sonosVolumeTasks[deviceID] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard let self, !Task.isCancelled,
+                  self.sonosVolumeGeneration[deviceID] == generation else { return }
+            do {
+                try await SonosUPnPClient.setVolume(desiredVolume, for: receiver)
+                if self.sonosVolumeGeneration[deviceID] == generation {
+                    self.sonosVolumeTasks[deviceID] = nil
+                }
+            } catch {
+                if self.sonosVolumeGeneration[deviceID] == generation {
+                    self.sonosStatus[deviceID] = "Volume update failed"
+                    NSLog("[SoundCast][AppState] Sonos volume update for \(deviceID) failed: \(error)")
+                    self.sonosVolumeTasks[deviceID] = nil
+                }
+            }
+        }
+    }
+
+    private func volume(gain: Float) -> Int {
+        Int((max(0, min(1, gain)) * 100).rounded())
     }
 
     // MARK: - AirPlay

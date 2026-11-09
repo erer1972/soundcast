@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Network
 
 /// Serves one live stereo PCM stream as WAV over HTTP.
 /// The caller owns a dedicated ring buffer for this receiver.
@@ -7,14 +8,14 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
     public enum ServerError: Error, CustomStringConvertible {
         case invalidSampleRate(Double)
         case invalidPeerAddress(String)
-        case socketFailure(String, Int32)
+        case listenerFailure(String)
         case alreadyRunning
 
         public var description: String {
             switch self {
             case .invalidSampleRate(let rate): return "unsupported WAV sample rate \(rate)"
             case .invalidPeerAddress(let address): return "invalid Sonos IPv4 address \(address)"
-            case .socketFailure(let operation, let code): return "\(operation) failed (errno \(code))"
+            case .listenerFailure(let reason): return "Sonos HTTP listener failed: \(reason)"
             case .alreadyRunning: return "Sonos HTTP audio server is already running"
             }
         }
@@ -27,14 +28,19 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
     private let delaySeconds: Double
     private let onStreamInterrupted: (@Sendable () -> Void)?
     private let lock = NSLock()
-    private var listenerSocket: Int32 = -1
+    private var listener: NWListener?
     private var running = false
-    private var clients: Set<Int32> = []
-    private var streamClient: Int32?
+    private var clients: [UUID: NWConnection] = [:]
+    private var streamClient: UUID?
     private var streamClientIsReceiver = false
     private var testUnavailableUntil: TimeInterval?
 
-    public init(source: RingBuffer, sampleRate: Double, delaySeconds: Double = 0, onStreamInterrupted: (@Sendable () -> Void)? = nil) {
+    public init(
+        source: RingBuffer,
+        sampleRate: Double,
+        delaySeconds: Double = 0,
+        onStreamInterrupted: (@Sendable () -> Void)? = nil
+    ) {
         self.source = source
         self.sampleRate = sampleRate
         self.delaySeconds = delaySeconds.isFinite ? max(0, min(10, delaySeconds)) : 0
@@ -43,73 +49,57 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
 
     /// Starts an HTTP listener on the interface routed to the Sonos and
     /// returns a URL the Sonos can use as its AVTransport current URI.
-    public func start(peerIPv4: String) throws -> URL {
+    public func start(peerIPv4: String) async throws -> URL {
         guard beginStart() else { throw ServerError.alreadyRunning }
         var started = false
         defer { if !started { stop() } }
         try Self.validateSampleRate(sampleRate)
 
-        guard let localAddress = Self.routeSelectedLocalAddress(to: peerIPv4) else {
+        guard let localAddress = Self.routeSelectedLocalAddress(to: peerIPv4),
+              let localIPv4 = IPv4Address(localAddress) else {
             throw ServerError.invalidPeerAddress(peerIPv4)
         }
-        var peerAddress = in_addr()
-        guard peerIPv4.withCString({ inet_pton(AF_INET, $0, &peerAddress) }) == 1 else {
-            throw ServerError.invalidPeerAddress(peerIPv4)
-        }
-        let receiverAddress = peerAddress.s_addr
 
-        let socket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-        guard socket >= 0 else { throw ServerError.socketFailure("socket", errno) }
-        var reuse: Int32 = 1
-        _ = setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout.size(ofValue: reuse)))
-
-        var local = sockaddr_in()
-        local.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        local.sin_family = sa_family_t(AF_INET)
-        local.sin_port = 0
-        guard localAddress.withCString({ inet_pton(AF_INET, $0, &local.sin_addr) }) == 1 else {
-            Darwin.close(socket)
-            throw ServerError.invalidPeerAddress(localAddress)
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(localIPv4), port: .any)
+        let listener: NWListener
+        do {
+            listener = try NWListener(using: parameters)
+        } catch {
+            throw ServerError.listenerFailure(String(describing: error))
         }
-        let bindResult = withUnsafePointer(to: &local) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(socket, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+
+        setListener(listener)
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.accept(connection, receiverIPv4: peerIPv4)
+        }
+
+        let url: URL = try await withCheckedThrowingContinuation { continuation in
+            let gate = ListenerStartGate(continuation)
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    listener.stateUpdateHandler = nil
+                    guard let port = listener.port,
+                          let url = URL(string: "http://\(localAddress):\(port.rawValue)/stream.wav") else {
+                        gate.resume(.failure(ServerError.listenerFailure("listener has no bound port")))
+                        return
+                    }
+                    gate.resume(.success(url))
+                case .failed(let error):
+                    listener.stateUpdateHandler = nil
+                    gate.resume(.failure(ServerError.listenerFailure(String(describing: error))))
+                case .cancelled:
+                    listener.stateUpdateHandler = nil
+                    gate.resume(.failure(ServerError.listenerFailure("listener cancelled during startup")))
+                default:
+                    break
+                }
             }
-        }
-        guard bindResult == 0 else {
-            let code = errno
-            Darwin.close(socket)
-            throw ServerError.socketFailure("bind", code)
-        }
-        guard Darwin.listen(socket, 8) == 0 else {
-            let code = errno
-            Darwin.close(socket)
-            throw ServerError.socketFailure("listen", code)
+            listener.start(queue: DispatchQueue.global(qos: .userInitiated))
         }
 
-        var bound = sockaddr_in()
-        var boundLength = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let nameResult = withUnsafeMutablePointer(to: &bound) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                getsockname(socket, $0, &boundLength)
-            }
-        }
-        guard nameResult == 0 else {
-            let code = errno
-            Darwin.close(socket)
-            throw ServerError.socketFailure("getsockname", code)
-        }
-        let port = UInt16(bigEndian: bound.sin_port)
-        setListener(socket)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.acceptLoop(socket, receiverAddress: receiverAddress)
-        }
-
-        guard let url = URL(string: "http://\(localAddress):\(port)/stream.wav") else {
-            stop()
-            throw ServerError.invalidPeerAddress(localAddress)
-        }
-        NSLog("[SoundCast][SonosHTTPAudioServer] listening on port \(port)")
+        NSLog("[SoundCast][SonosHTTPAudioServer] listening on port \(url.port ?? 0)")
         started = true
         return url
     }
@@ -127,126 +117,198 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             return
         }
         running = false
-        let listener = listenerSocket
-        listenerSocket = -1
-        for client in clients { _ = Darwin.shutdown(client, SHUT_RDWR) }
+        let listener = self.listener
+        self.listener = nil
+        let activeClients = Array(clients.values)
         clients.removeAll()
         streamClient = nil
         streamClientIsReceiver = false
         testUnavailableUntil = nil
         lock.unlock()
 
-        if listener >= 0 {
-            _ = Darwin.shutdown(listener, SHUT_RDWR)
-            Darwin.close(listener)
-        }
+        listener?.cancel()
+        for connection in activeClients { connection.cancel() }
     }
 
     public func disconnectClientsForTesting(unavailableSeconds: TimeInterval = 0) -> Int {
         lock.lock()
-        defer { lock.unlock() }
         if unavailableSeconds.isFinite, unavailableSeconds > 0 {
             testUnavailableUntil = ProcessInfo.processInfo.systemUptime + min(unavailableSeconds, 30)
         }
-        for client in clients { _ = Darwin.shutdown(client, SHUT_RDWR) }
-        return clients.count
+        let activeClients = Array(clients.values)
+        lock.unlock()
+        for connection in activeClients { connection.cancel() }
+        return activeClients.count
     }
 
-    private func acceptLoop(_ listener: Int32, receiverAddress: in_addr_t) {
-        NSLog("[SoundCast][SonosHTTPAudioServer] accept loop started")
-        while isRunning {
-            var descriptor = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
-            let pollResult = Darwin.poll(&descriptor, 1, 1_000)
-            if pollResult == 0 { continue }
-            if pollResult < 0 {
-                if errno == EINTR { continue }
-                if isRunning { NSLog("[SoundCast][SonosHTTPAudioServer] poll failed (errno \(errno))") }
+    private func accept(_ connection: NWConnection, receiverIPv4: String) {
+        let clientID = UUID()
+        let isReceiver: Bool
+        if case .hostPort(let host, _ ) = connection.endpoint,
+           let address = IPv4Address(receiverIPv4) {
+            isReceiver = host == .ipv4(address)
+        } else {
+            isReceiver = false
+        }
+
+        lock.lock()
+        let shouldServe = running
+        if shouldServe { clients[clientID] = connection }
+        lock.unlock()
+        guard shouldServe else {
+            connection.cancel()
+            return
+        }
+
+        NSLog("[SoundCast][SonosHTTPAudioServer] accepted client")
+        let receiveGate = ConnectionReceiveGate()
+        connection.stateUpdateHandler = { [weak self] state in
+            NSLog("[SoundCast][SonosHTTPAudioServer] client state: \(state)")
+            switch state {
+            case .ready:
+                guard receiveGate.claim() else { return }
+                self?.receiveRequest(clientID, connection: connection, data: Data(), isReceiver: isReceiver)
+            case .failed, .cancelled:
+                self?.removeClient(clientID)
+            default:
+                break
+            }
+        }
+        connection.start(queue: DispatchQueue.global(qos: .userInitiated))
+    }
+
+    private func receiveRequest(
+        _ clientID: UUID,
+        connection: NWConnection,
+        data: Data,
+        isReceiver: Bool
+    ) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] newData, _, isComplete, error in
+            NSLog("[SoundCast][SonosHTTPAudioServer] received \(newData?.count ?? 0) request byte(s), complete=\(isComplete), error=\(String(describing: error))")
+            guard let self else {
+                connection.cancel()
                 return
             }
-            guard descriptor.revents & Int16(POLLIN) != 0 else { continue }
-
-            var address = sockaddr_in()
-            var addressLength = socklen_t(MemoryLayout<sockaddr_in>.size)
-            let client = withUnsafeMutablePointer(to: &address) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.accept(listener, $0, &addressLength)
+            var request = data
+            if let newData { request.append(newData) }
+            let terminator = Data([13, 10, 13, 10])
+            if request.range(of: terminator) != nil {
+                guard let text = String(data: request, encoding: .utf8),
+                      let requestLine = text.components(separatedBy: "\r\n").first else {
+                    self.sendAndClose(clientID, connection: connection, response: Self.errorResponse(400, "Bad Request"))
+                    return
                 }
+                self.serve(
+                    clientID, connection: connection, requestLine: requestLine,
+                    rangeStart: Self.rangeStart(in: text), isReceiver: isReceiver
+                )
+            } else if error != nil || isComplete || request.count >= 8192 {
+                connection.cancel()
+            } else {
+                self.receiveRequest(clientID, connection: connection, data: request, isReceiver: isReceiver)
             }
-            guard client >= 0 else {
-                if errno == EINTR { continue }
-                if errno == EAGAIN || errno == EWOULDBLOCK { return }
-                if isRunning { NSLog("[SoundCast][SonosHTTPAudioServer] accept failed (errno \(errno))") }
-                return
-            }
-            var noSignal: Int32 = 1
-            _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout.size(ofValue: noSignal)))
-            lock.lock()
-            let shouldServe = running
-            if shouldServe { clients.insert(client) }
-            lock.unlock()
-            guard shouldServe else { Darwin.close(client); return }
-            NSLog("[SoundCast][SonosHTTPAudioServer] accepted client")
-            let isReceiver = address.sin_addr.s_addr == receiverAddress
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.serve(client, isReceiver: isReceiver) }
         }
     }
 
-    private func serve(_ client: Int32, isReceiver: Bool) {
-        defer {
-            lock.lock()
-            clients.remove(client)
-            if streamClient == client {
-                streamClient = nil
-                streamClientIsReceiver = false
-            }
-            lock.unlock()
-            Darwin.close(client)
-        }
-        guard let request = readRequest(client),
-              let requestLine = request.components(separatedBy: "\r\n").first else { return }
-                NSLog("[SoundCast][SonosHTTPAudioServer] request: \(requestLine)")
+    private func serve(_ clientID: UUID, connection: NWConnection, requestLine: String, rangeStart: Int?, isReceiver: Bool) {
+        NSLog("[SoundCast][SonosHTTPAudioServer] request: \(requestLine)\(rangeStart.map { " (range from \($0))" } ?? "")")
         let fields = requestLine.split(separator: " ")
-        guard fields.count >= 2 else { return }
-                let response = "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: \(Self.waveLength)\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        guard fields.count >= 2 else {
+            sendAndClose(clientID, connection: connection, response: Self.errorResponse(400, "Bad Request"))
+            return
+        }
+
+        // After a dropped connection the Sonos reconnects by itself with
+        // "Range: bytes=N-" to resume. Answer that with 206 and live audio
+        // from now on; a 200 from offset 0 makes it reset the connection.
+        let total = Int(Self.waveLength)
+        let start = rangeStart.flatMap { (1..<total).contains($0) ? $0 : nil } ?? 0
+        let response: String
+        if start > 0 {
+            response = "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/wav\r\nContent-Range: bytes \(start)-\(total - 1)/\(total)\r\nContent-Length: \(total - start)\r\nAccept-Ranges: bytes\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        } else {
+            response = "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: \(total)\r\nAccept-Ranges: bytes\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+        }
         if fields[0] == "HEAD", fields[1] == "/stream.wav" {
-            _ = sendAll(client, Data(response.utf8))
+            sendAndClose(clientID, connection: connection, response: response)
             return
         }
         guard fields[0] == "GET", fields[1] == "/stream.wav" else {
-            let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            _ = sendAll(client, Data(response.utf8))
+            sendAndClose(clientID, connection: connection, response: Self.errorResponse(404, "Not Found"))
+            return
+        }
+        if isReceiver && isTestUnavailable {
+            NSLog("[SoundCast][SonosHTTPAudioServer] test outage: rejecting receiver request")
+            sendAndClose(clientID, connection: connection, response: Self.errorResponse(503, "Service Unavailable", retryAfter: true))
+            return
+        }
+        guard claimStream(clientID, isReceiver: isReceiver) else {
+            sendAndClose(clientID, connection: connection, response: Self.errorResponse(503, "Service Unavailable"))
             return
         }
 
-        if isReceiver && isTestUnavailable {
-            NSLog("[SoundCast][SonosHTTPAudioServer] test outage: rejecting receiver request")
-            _ = sendAll(client, Data("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 1\r\nConnection: close\r\n\r\n".utf8))
-            return
+        var header = Data(response.utf8)
+        let waveHeader = Self.waveHeader(sampleRate: UInt32(sampleRate.rounded()))
+        var bodyPrefix = 0
+        if start < waveHeader.count {
+            header.append(waveHeader.suffix(from: start))
+            bodyPrefix = waveHeader.count - start
+        } else {
+            // Pad a partial frame with zeros so later samples stay aligned.
+            let partialFrame = (4 - (start - waveHeader.count) % 4) % 4
+            header.append(Data(count: partialFrame))
+            bodyPrefix = partialFrame
         }
-        guard claimStream(client, isReceiver: isReceiver) else {
-            _ = sendAll(client, Data("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8))
-            return
-        }
-        guard sendAll(client, Data(response.utf8)), sendAll(client, Self.waveHeader(sampleRate: UInt32(sampleRate.rounded()))) else { return }
+        let audioBytes = total - start - bodyPrefix
+        connection.send(content: header, completion: .contentProcessed { [weak self] error in
+            guard let self, error == nil else {
+                connection.cancel()
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.streamAudio(clientID, connection: connection, audioBytes: audioBytes, isReceiver: isReceiver)
+            }
+        })
+    }
+
+    private func streamAudio(_ clientID: UUID, connection: NWConnection, audioBytes: Int, isReceiver: Bool) {
         var peak: Float = 0
         var chunks = 0
-        var remaining = Int(Self.waveLength) - 44
+        var remaining = audioBytes
         var silentFrames = Int(sampleRate * delaySeconds)
         var nextDeadline = ProcessInfo.processInfo.systemUptime
         defer { NSLog("[SoundCast][SonosHTTPAudioServer] stream ended: \(chunks) chunks, peak \(peak)") }
+
         while isRunning && remaining > 0 {
             var samples = [Float](repeating: 0, count: Self.chunkFrames * 2)
             let silent = min(silentFrames, Self.chunkFrames)
             silentFrames -= silent
-            let isCurrent = samples.withUnsafeMutableBufferPointer {
-                readStream(client, into: $0.baseAddress!.advanced(by: silent * 2), count: $0.count - silent * 2)
+            let status = samples.withUnsafeMutableBufferPointer {
+                readStream(clientID, into: $0.baseAddress!.advanced(by: silent * 2), count: $0.count - silent * 2)
             }
-            guard isCurrent else { return }
-            for sample in samples where sample.isFinite { peak = max(peak, abs(sample)) }
-            let data = Self.pcm16(samples)
-            let count = min(remaining, data.count)
-            guard sendAll(client, Data(data.prefix(count))) else {
+            switch status {
+            case .current:
+                break
+            case .replaced:
+                return
+            case .lost:
+                // The connection closed underneath us (NWConnection reports
+                // .failed/.cancelled before a send fails), so treat it like a
+                // failed send rather than a deliberate handover.
                 if chunks >= 150 && isReceiver && isRunning { onStreamInterrupted?() }
+                connection.cancel()
+                return
+            }
+            for sample in samples where sample.isFinite { peak = max(peak, abs(sample)) }
+            let encoded = Self.pcm16(samples)
+            let count = min(remaining, encoded.count)
+            let result = NWSendResult()
+            connection.send(content: Data(encoded.prefix(count)), completion: .contentProcessed { error in
+                result.finish(error == nil)
+            })
+            guard result.wait() else {
+                if chunks >= 150 && isReceiver && isRunning { onStreamInterrupted?() }
+                connection.cancel()
                 return
             }
             remaining -= count
@@ -255,56 +317,72 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             let delay = nextDeadline - ProcessInfo.processInfo.systemUptime
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         }
+        connection.cancel()
     }
 
-    private func claimStream(_ client: Int32, isReceiver: Bool) -> Bool {
+    private func sendAndClose(_ clientID: UUID, connection: NWConnection, response: String) {
+        connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+    }
+
+    /// Start offset of a "Range: bytes=N-" request header, if any.
+    private static func rangeStart(in request: String) -> Int? {
+        for line in request.components(separatedBy: "\r\n").dropFirst() {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2,
+                  parts[0].trimmingCharacters(in: .whitespaces).lowercased() == "range" else { continue }
+            let value = parts[1].trimmingCharacters(in: .whitespaces).lowercased()
+            guard value.hasPrefix("bytes="),
+                  let first = value.dropFirst(6).split(separator: "-", omittingEmptySubsequences: false).first else { return nil }
+            return Int(first)
+        }
+        return nil
+    }
+
+    private static func errorResponse(_ code: Int, _ reason: String, retryAfter: Bool = false) -> String {
+        let retry = retryAfter ? "Retry-After: 1\r\n" : ""
+        return "HTTP/1.1 \(code) \(reason)\r\nContent-Length: 0\r\n\(retry)Connection: close\r\n\r\n"
+    }
+
+    private func claimStream(_ clientID: UUID, isReceiver: Bool) -> Bool {
         lock.lock()
-        defer { lock.unlock() }
-        guard running, isReceiver || !streamClientIsReceiver else { return false }
-        if let previous = streamClient, previous != client { _ = Darwin.shutdown(previous, SHUT_RDWR) }
-        streamClient = client
+        guard running, isReceiver || !streamClientIsReceiver else {
+            lock.unlock()
+            return false
+        }
+        let previous = streamClient.flatMap { clients[$0] }
+        if let previousID = streamClient, previousID != clientID { clients[previousID] = nil }
+        streamClient = clientID
         streamClientIsReceiver = isReceiver
+        lock.unlock()
+        previous?.cancel()
         return true
     }
 
-    private func readStream(_ client: Int32, into output: UnsafeMutablePointer<Float>, count: Int) -> Bool {
+    private enum StreamStatus { case current, replaced, lost }
+
+    private func readStream(_ clientID: UUID, into output: UnsafeMutablePointer<Float>, count: Int) -> StreamStatus {
         lock.lock()
         defer { lock.unlock() }
-        guard running, streamClient == client else { return false }
+        guard running else { return .replaced }
+        guard streamClient == clientID else { return streamClient == nil ? .lost : .replaced }
         if count > 0 { source.read(into: output, count: count) }
-        return true
+        return .current
+    }
+
+    private func removeClient(_ clientID: UUID) {
+        lock.lock()
+        clients[clientID] = nil
+        if streamClient == clientID {
+            streamClient = nil
+            streamClientIsReceiver = false
+        }
+        lock.unlock()
     }
 
     private var isTestUnavailable: Bool {
         lock.lock()
         defer { lock.unlock() }
         return testUnavailableUntil.map { ProcessInfo.processInfo.systemUptime < $0 } == true
-    }
-
-    private func readRequest(_ client: Int32) -> String? {
-        let terminator = Data("\r\n\r\n".utf8)
-        var request = Data()
-        var buffer = [UInt8](repeating: 0, count: 1024)
-        while request.count < 8192, request.range(of: terminator) == nil {
-            let received = buffer.withUnsafeMutableBytes { Darwin.recv(client, $0.baseAddress!, $0.count, 0) }
-            guard received > 0 else { return nil }
-            request.append(contentsOf: buffer.prefix(received))
-        }
-        return String(data: request, encoding: .utf8)
-    }
-
-    private func sendAll(_ client: Int32, _ data: Data) -> Bool {
-        data.withUnsafeBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress else { return data.isEmpty }
-            var sent = 0
-            while sent < rawBuffer.count {
-                let result = Darwin.send(client, base.advanced(by: sent), rawBuffer.count - sent, 0)
-                if result < 0, errno == EINTR { continue }
-                guard result > 0 else { return false }
-                sent += result
-            }
-            return true
-        }
     }
 
     private func beginStart() -> Bool {
@@ -315,9 +393,9 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         return true
     }
 
-    private func setListener(_ socket: Int32) {
+    private func setListener(_ listener: NWListener) {
         lock.lock()
-        listenerSocket = socket
+        self.listener = listener
         lock.unlock()
     }
 
@@ -333,10 +411,6 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         peer.sin_family = sa_family_t(AF_INET)
         guard peerIPv4.withCString({ inet_pton(AF_INET, $0, &peer.sin_addr) }) == 1 else { return nil }
         return AirPlayPTPClock.routeSelectedIPv4(to: peer)
-    }
-
-    private func routeSelectedLocalAddress(to peerIPv4: String) -> String? {
-        Self.routeSelectedLocalAddress(to: peerIPv4)
     }
 
     private static func waveHeader(sampleRate: UInt32) -> Data {
@@ -375,3 +449,55 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
     }
 }
+
+private final class ListenerStartGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let continuation: CheckedContinuation<URL, Error>
+    private var completed = false
+
+    init(_ continuation: CheckedContinuation<URL, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ result: Result<URL, Error>) {
+        lock.lock()
+        guard !completed else { lock.unlock(); return }
+        completed = true
+        lock.unlock()
+        continuation.resume(with: result)
+    }
+}
+
+private final class NWSendResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var succeeded = false
+
+    func finish(_ succeeded: Bool) {
+        lock.lock()
+        self.succeeded = succeeded
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    func wait() -> Bool {
+        guard semaphore.wait(timeout: .now() + 2) == .success else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        return succeeded
+    }
+}
+
+private final class ConnectionReceiveGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !claimed else { return false }
+        claimed = true
+        return true
+    }
+}
+
