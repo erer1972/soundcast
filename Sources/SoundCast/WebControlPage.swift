@@ -67,8 +67,6 @@ enum WebControlPage {
 let state = null;
 let busyUntil = 0;
 const timers = {};
-let expanded = new Set();
-try { expanded = new Set(JSON.parse(localStorage.getItem("expanded") || "[]")); } catch (e) {}
 
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ms = v => (v > 0 ? "+" : "") + Math.round(v) + " ms";
@@ -101,10 +99,9 @@ function slider(key, command, final) {
 
 function renderMeters() {
   if (!state) return;
-  for (const s of state.sources) {
-    const el = document.querySelector('.meter div[data-source="' + CSS.escape(s.id) + '"]');
-    if (el) el.style.width = (s.active ? Math.min(100, Math.sqrt(s.level) * 110) : 0) + "%";
-  }
+  const el = document.getElementById("meter");
+  const c = state.casting;
+  if (el) el.style.width = (c.on ? Math.min(100, Math.sqrt(c.level) * 110) : 0) + "%";
 }
 
 function render() {
@@ -114,35 +111,32 @@ function render() {
   h += '<div class="card"><div class="row"><span class="name">Master Volume</span><span class="value" id="v-master">' + Math.round(state.master * 100) + '%</span></div>';
   h += '<input type="range" min="0" max="100" value="' + Math.round(state.master * 100) + '" data-act="setMaster" data-scale="0.01" data-out="v-master" data-fmt="pct"></div>';
 
-  h += '<div class="label">Sources</div>';
-  for (const s of state.sources) {
-    const open = expanded.has(s.id);
-    h += '<div class="card"><div class="row"><span class="name">' + esc(s.name) + '</span>';
-    h += '<label class="switch"><input type="checkbox" data-act="setActive" data-source="' + esc(s.id) + '"' + (s.active ? " checked" : "") + '><span></span></label></div>';
-    if (s.error) h += '<div class="error">' + esc(s.error) + "</div>";
-    h += '<div class="meter"><div data-source="' + esc(s.id) + '"></div></div>';
-    h += '<button class="more" data-toggle="' + esc(s.id) + '">' + (open ? "▾ Rooms" : "▸ Rooms") + " (" + s.selected.length + " on)</button>";
-    if (open) {
-      for (const g of state.groups) {
-        h += '<div class="group">' + esc(g.name) + "</div>";
-        for (const d of g.devices) {
-          const on = s.selected.includes(d.id);
-          const status = d.unpaired ? "Pair on the Mac" : d.status;
-          const bad = /fail|not found|pair/i.test(status);
-          h += '<div class="device"><div class="row"><input class="check" type="checkbox" data-act="toggleDevice" data-source="' + esc(s.id) + '" data-device="' + esc(d.id) + '"' + (on ? " checked" : "") + '>';
-          h += '<span class="name">' + esc(d.name) + (status ? '<br><span class="status' + (bad ? " bad" : "") + '">' + esc(status) + "</span>" : "") + "</span>";
-          if (on && /failed|not found/i.test(d.status) && d.id.startsWith("sonos:")) h += '<button data-retry="' + esc(d.id) + '" data-source="' + esc(s.id) + '">Retry</button>';
-          h += "</div>";
-          if (on) {
-            const g100 = Math.round((s.gains[d.id] ?? 1) * 100);
-            h += '<div class="gain"><input type="range" min="0" max="100" value="' + g100 + '" data-act="setGain" data-scale="0.01" data-source="' + esc(s.id) + '" data-device="' + esc(d.id) + '"></div>';
-          }
-          h += "</div>";
-        }
+  const c = state.casting;
+  h += '<div class="card"><div class="row"><span class="name">Casting</span>';
+  h += '<label class="switch"><input type="checkbox" data-act="setCasting"' + (c.on ? " checked" : "") + '><span></span></label></div>';
+  if (c.error) h += '<div class="error">' + esc(c.error) + "</div>";
+  if (c.fallback) h += '<div class="hint" style="color:#ffb35c">' + esc(c.fallback) + ". Casting all Mac audio instead — volume keys and video lip sync need the driver.</div>";
+  h += '<div class="meter"><div id="meter"></div></div></div>';
+
+  h += '<div class="label">Rooms (' + c.selected.length + ' on)</div><div class="card">';
+  for (const g of state.groups) {
+    h += '<div class="group">' + esc(g.name) + "</div>";
+    for (const d of g.devices) {
+      const on = c.selected.includes(d.id);
+      const status = d.unpaired ? "Pair on the Mac" : d.status;
+      const bad = /fail|not found|pair/i.test(status);
+      h += '<div class="device"><div class="row"><input class="check" type="checkbox" data-act="toggleDevice" data-device="' + esc(d.id) + '"' + (on ? " checked" : "") + '>';
+      h += '<span class="name">' + esc(d.name) + (status ? '<br><span class="status' + (bad ? " bad" : "") + '">' + esc(status) + "</span>" : "") + "</span>";
+      if (on && /failed|not found/i.test(d.status) && d.id.startsWith("sonos:")) h += '<button data-retry="' + esc(d.id) + '">Retry</button>';
+      h += "</div>";
+      if (on) {
+        const g100 = Math.round((c.gains[d.id] ?? 1) * 100);
+        h += '<div class="gain"><input type="range" min="0" max="100" value="' + g100 + '" data-act="setGain" data-scale="0.01" data-device="' + esc(d.id) + '"></div>';
       }
+      h += "</div>";
     }
-    h += "</div>";
   }
+  h += "</div>";
 
   h += '<div class="label">Sync</div><div class="card">';
   h += '<div class="row"><span class="name">AirPlay Sync</span><span class="value" id="v-air">' + ms(state.airplaySync) + "</span></div>";
@@ -164,31 +158,26 @@ document.addEventListener("input", e => {
   if (t.type !== "range") return;
   const value = Number(t.value) * Number(t.dataset.scale || 1);
   if (t.dataset.out) document.getElementById(t.dataset.out).textContent = t.dataset.fmt === "pct" ? t.value + "%" : ms(Number(t.value));
-  slider(t.dataset.act + (t.dataset.source || "") + (t.dataset.device || ""), { action: t.dataset.act, source: t.dataset.source, device: t.dataset.device, value }, false);
+  slider(t.dataset.act + (t.dataset.device || ""), { action: t.dataset.act, device: t.dataset.device, value }, false);
 });
 
 document.addEventListener("change", e => {
   const t = e.target;
   if (t.type === "range") {
     const value = Number(t.value) * Number(t.dataset.scale || 1);
-    slider(t.dataset.act + (t.dataset.source || "") + (t.dataset.device || ""), { action: t.dataset.act, source: t.dataset.source, device: t.dataset.device, value }, true);
-  } else if (t.dataset.act === "setActive") {
-    act({ action: "setActive", source: t.dataset.source, on: t.checked });
+    slider(t.dataset.act + (t.dataset.device || ""), { action: t.dataset.act, device: t.dataset.device, value }, true);
+  } else if (t.dataset.act === "setCasting") {
+    act({ action: "setCasting", on: t.checked });
   } else if (t.dataset.act === "toggleDevice") {
-    act({ action: "toggleDevice", source: t.dataset.source, device: t.dataset.device });
+    act({ action: "toggleDevice", device: t.dataset.device });
   }
 });
 
 document.addEventListener("click", e => {
   const t = e.target.closest("button");
   if (!t) return;
-  if (t.dataset.toggle) {
-    const id = t.dataset.toggle;
-    if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
-    try { localStorage.setItem("expanded", JSON.stringify([...expanded])); } catch (err) {}
-    render();
-  } else if (t.dataset.retry) {
-    act({ action: "retry", source: t.dataset.source, device: t.dataset.retry });
+  if (t.dataset.retry) {
+    act({ action: "retry", device: t.dataset.retry });
   } else if ("calibrate" in t.dataset) {
     act({ action: "calibrate" });
   }
