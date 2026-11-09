@@ -5,3 +5,4 @@ dist/
 .DS_Store
 .soundcast_build_keychain.pass
 HALPlugin/test_shm_flow
+.vscode/
