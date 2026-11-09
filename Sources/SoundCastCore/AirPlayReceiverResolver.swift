@@ -62,7 +62,7 @@ public enum AirPlayReceiverResolver {
         if interfaceName == nil {
             var nameBuffer = [CChar](repeating: 0, count: Int(IF_NAMESIZE) + 1)
             if if_indextoname(service.interfaceIndex, &nameBuffer) != nil {
-                interfaceName = String(cString: nameBuffer)
+                interfaceName = String(nulTerminated: nameBuffer)
             }
         }
         guard let interfaceName else { throw ResolveError.missingAddress("interface") }
@@ -182,6 +182,17 @@ public enum AirPlayReceiverResolver {
 /// can't capture context, can call it.
 private func numericString<T>(_ family: Int32, _ address: inout T) -> String? {
     var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-    guard inet_ntop(family, &address, &buffer, socklen_t(buffer.count)) != nil else { return nil }
-    return String(cString: buffer)
+    let result = withUnsafePointer(to: &address) {
+        inet_ntop(family, UnsafeRawPointer($0), &buffer, socklen_t(buffer.count))
+    }
+    guard result != nil else { return nil }
+    return String(nulTerminated: buffer)
+}
+
+extension String {
+    /// Decodes a NUL-terminated C character buffer (replaces the deprecated
+    /// `String(cString:)` array overload).
+    init(nulTerminated buffer: [CChar]) {
+        self = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
 }

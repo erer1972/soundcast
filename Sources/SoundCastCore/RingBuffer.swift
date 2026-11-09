@@ -19,7 +19,8 @@ import Foundation
 /// buffer per consumer, all fed by the same capture callback — not a
 /// single multi-consumer structure — so each consumer can apply its own
 /// read-offset (design doc §6) independently.
-public final class RingBuffer {
+/// Shared across threads by design; every access goes through `lock`.
+public final class RingBuffer: @unchecked Sendable {
     private var storage: [Float]
     private let capacity: Int
     private var writeIndex = 0

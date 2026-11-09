@@ -195,7 +195,7 @@ let serverDurationSeconds = sonosWAVMode && args.count > 1
 let pollInterval = 0.5
 if sonosMode {
     let discovery = SonosDiscovery()
-    await discovery.start()
+    discovery.start()
     print("Browsing _sonos._tcp and fetching device descriptions for \(durationSeconds)s...")
 
     var elapsed = 0.0
@@ -205,7 +205,7 @@ if sonosMode {
     while elapsed < durationSeconds {
         try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
         elapsed += pollInterval
-        for receiver in await discovery.receivers where discovered[receiver.id] == nil {
+        for receiver in discovery.receivers where discovered[receiver.id] == nil {
             discovered[receiver.id] = receiver
             if (sonosLiveMode || sonosVolumeMode) && receiver.name == sonosTargetName { targetFound = true }
             let modelText = receiver.model.map { " (\($0))" } ?? ""
@@ -233,7 +233,7 @@ if sonosMode {
         if targetFound { break }
     }
 
-    await discovery.stop()
+    discovery.stop()
     if discovered.isEmpty {
         print("\nFAIL: discovered zero Sonos receivers with readable UPnP descriptions.")
         exit(1)
@@ -540,7 +540,7 @@ if sonosMode {
 }
 
 let discovery = AirPlayDiscovery()
-await discovery.start()
+discovery.start()
 print("Browsing _airplay._tcp for \(durationSeconds)s...")
 
 var elapsed = 0.0
@@ -548,7 +548,7 @@ var lastCount = -1
 while elapsed < durationSeconds {
     try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
     elapsed += pollInterval
-    let found = await discovery.receivers
+    let found = discovery.receivers
     if found.count != lastCount {
         lastCount = found.count
         print("  [t=\(elapsed)s] \(found.count) receiver(s):")
@@ -560,8 +560,8 @@ while elapsed < durationSeconds {
     }
 }
 
-let finalReceivers = await discovery.receivers
-await discovery.stop()
+let finalReceivers = discovery.receivers
+discovery.stop()
 
 if finalReceivers.isEmpty {
     print("\nFAIL: discovered zero AirPlay receivers — expected to find at least one on this LAN.")

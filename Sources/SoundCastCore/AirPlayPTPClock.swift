@@ -498,7 +498,7 @@ public final class AirPlayPTPClock: @unchecked Sendable {
                 var inAddress = UnsafeRawPointer(address).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
                 var output = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                 if inet_ntop(AF_INET, &inAddress, &output, socklen_t(output.count)) != nil,
-                   String(cString: output) == ipv4Address {
+                   String(nulTerminated: output) == ipv4Address {
                     return String(cString: item.ifa_name)
                 }
             }

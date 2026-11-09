@@ -155,7 +155,8 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
     /// connections (like the event connection SETUP phase 1 opens) this
     /// client never normally reads from.
     public func startDiagnosticLogging(label: String) {
-        func loop() {
+        let connection = self.connection
+        @Sendable func loop() {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
                 if let error {
                     FileHandle.standardError.write("[\(label)] receive error: \(error)\n".data(using: .utf8)!)
