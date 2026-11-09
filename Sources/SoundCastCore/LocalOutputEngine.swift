@@ -48,6 +48,9 @@ public final class LocalOutputEngine {
     /// The clock device's own output latency is subtracted. Takes effect
     /// on the next reconfigure.
     public var alignmentDelaySeconds: Double = 0
+    /// How long after capture the local outputs are heard (reserve +
+    /// added delay + the clock device's own latency); 0 when stopped.
+    public private(set) var heardLatencySeconds: Double = 0
     private var resampler: StreamResampler?
     private var mixScratch: UnsafeMutablePointer<Float>?
     private static let maxCallbackFrames = 16_384
@@ -123,6 +126,7 @@ public final class LocalOutputEngine {
         let outputRate = Self.nominalSampleRate(of: newAggregateID) ?? sourceSampleRate
         let deviceLatency = ordered[0].device.audioObjectID.map(Self.outputLatencySeconds) ?? 0
         let extraDelay = max(0, alignmentDelaySeconds - deviceLatency)
+        heardLatencySeconds = StreamResampler.reserveSeconds + extraDelay + deviceLatency
         resampler = StreamResampler(
             ring: sourceRingBuffer, sourceRate: sourceSampleRate, outputRate: outputRate, extraDelaySeconds: extraDelay
         )
@@ -146,6 +150,7 @@ public final class LocalOutputEngine {
             AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
             self.ioProcID = nil
         }
+        heardLatencySeconds = 0
         if aggregateDeviceID != kAudioObjectUnknown {
             AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
             aggregateDeviceID = kAudioObjectUnknown
@@ -265,6 +270,7 @@ public final class LocalOutputEngine {
 /// underrun it outputs silence and re-buffers to the target first.
 /// Only the render thread touches it after construction.
 final class StreamResampler: @unchecked Sendable {
+    static let reserveSeconds = 0.06
     private let ring: RingBuffer
     private let baseStep: Double          // source frames per output frame
     private let targetFill: Double        // source frames to keep queued
@@ -286,7 +292,7 @@ final class StreamResampler: @unchecked Sendable {
     init(ring: RingBuffer, sourceRate: Double, outputRate: Double, extraDelaySeconds: Double = 0) {
         self.ring = ring
         baseStep = sourceRate / outputRate
-        targetFill = sourceRate * (0.06 + extraDelaySeconds)
+        targetFill = sourceRate * (Self.reserveSeconds + extraDelaySeconds)
         source = .allocate(capacity: capacityFrames * 2)
         resetHistory()
     }

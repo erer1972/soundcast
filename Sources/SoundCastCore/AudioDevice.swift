@@ -55,6 +55,9 @@ public enum LocalDeviceEnumerator {
             // capture/output plumbing) back to the user as selectable
             // outputs — they're prefixed distinctly so we can filter them.
             if name.hasPrefix("SoundCast-Internal-") { return nil }
+            // Core Audio's own temporary aggregates (e.g. while an app uses
+            // the microphone through AVAudioEngine) aren't real outputs.
+            if name.hasPrefix("CADefaultDeviceAggregate") { return nil }
             // Likewise never offer our own virtual HAL devices as render
             // targets: audio sent to them is read straight back by
             // VirtualDeviceCapture, which would be a feedback loop (and

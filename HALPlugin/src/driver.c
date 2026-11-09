@@ -35,6 +35,7 @@
 
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <math.h>
+#include <dispatch/dispatch.h>
 #include <CoreFoundation/CFPlugInCOM.h>
 
 // kAudioDevicePropertyBufferFrameSize/Range live in AudioHardware.h (the
@@ -102,6 +103,11 @@ typedef struct {
     uint32_t capacityFrames;
     uint32_t channelCount;
     uint32_t sampleRateHz;
+    // Written by the app: how long after it reaches this device the audio
+    // is actually heard (network rooms, alignment delay), in frames at
+    // sampleRateHz. Reported as the device latency so video players can
+    // delay the picture to match.
+    _Atomic uint32_t latencyFrames;
     float ring[SOUNDCAST_SHM_CAPACITY_FRAMES * 2]; // channelCount fixed at 2 for this struct's static sizing
 } SoundCastSharedRing;
 
@@ -133,6 +139,8 @@ typedef struct {
     // read on the IO thread, written by SetPropertyData.
     _Atomic uint32_t volumeScalarBits;
     _Atomic uint32_t muted;
+    // Last latency announced to the host, to notice the app's changes.
+    _Atomic uint32_t reportedLatencyFrames;
 } SoundCastDeviceSlot;
 
 // Saved in Initialize so property changes can be announced to the host.
@@ -146,7 +154,7 @@ static AudioServerPlugInHostRef gHost = NULL;
 static SoundCastDeviceSlot gDeviceSlots[NUM_SOUNDCAST_DEVICES] = {
     { 2, 3, 4, 5, CFSTR("SoundCast"), CFSTR("com.soundcast.device"),
       "/soundcast_output_v1", 512, NULL, PTHREAD_MUTEX_INITIALIZER,
-      0, 0, 0x3F800000u /* 1.0f */, 0 },
+      0, 0, 0x3F800000u /* 1.0f */, 0, 0 },
 };
 
 // Volume taper: gain = scalar^2, so dB = 40*log10(scalar). Half-way on the
@@ -280,7 +288,9 @@ static bool SoundCastNull_EnsureSharedRing(SoundCastDeviceSlot* slot)
                     ring->channelCount = kDeviceChannelCount;
                     ring->sampleRateHz = kDeviceSampleRate;
                     if (fresh) { atomic_store(&ring->writeIndexFrames, 0); }
-                    atomic_store(&ring->initialized, 1);
+                    // Layout version, checked by the app: 2 = header with
+                    // latencyFrames (version 1 had a 5-field header).
+                    atomic_store(&ring->initialized, 2);
                     atomic_store_explicit(&slot->sharedRing, ring, memory_order_release);
                 }
                 close(fd); // mapping stays valid after close
@@ -325,6 +335,20 @@ static void SoundCastNull_WriteFrames(SoundCastDeviceSlot* slot, float* interlea
     }
 
     atomic_fetch_add(&ring->writeIndexFrames, frameCount);
+
+    // The app changed the latency: tell the host off the IO thread, so
+    // players re-read it and re-align the picture.
+    uint32_t latency = atomic_load(&ring->latencyFrames);
+    if (latency != atomic_exchange(&slot->reportedLatencyFrames, latency) && gHost != NULL) {
+        AudioObjectID deviceID = slot->deviceID;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            AudioObjectPropertyAddress changed[2] = {
+                { kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMain },
+                { kAudioDevicePropertyLatency, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+            };
+            gHost->PropertiesChanged(gHost, deviceID, 2, changed);
+        });
+    }
 }
 
 #pragma mark - Forward declarations (vtable field order, verified against the real SDK header)
@@ -751,7 +775,13 @@ static OSStatus SoundCastNull_GetPropertyData(AudioServerPlugInDriverRef inDrive
             case kAudioDevicePropertyDeviceCanBeDefaultDevice:
                 *(UInt32*)outData = (inAddress->mScope != kAudioObjectPropertyScopeInput && SoundCastNull_CanBeDefault(deviceSlot)) ? 1 : 0;
                 *outDataSize = sizeof(UInt32); break;
-            case kAudioDevicePropertyLatency:
+            case kAudioDevicePropertyLatency: {
+                SoundCastSharedRing* ring = atomic_load_explicit(&deviceSlot->sharedRing, memory_order_acquire);
+                UInt32 latency = ring != NULL ? atomic_load(&ring->latencyFrames) : 0;
+                atomic_store(&deviceSlot->reportedLatencyFrames, latency);
+                *(UInt32*)outData = inAddress->mScope == kAudioObjectPropertyScopeInput ? 0 : latency;
+                *outDataSize = sizeof(UInt32); break;
+            }
             case kAudioDevicePropertySafetyOffset:
                 *(UInt32*)outData = 0; *outDataSize = sizeof(UInt32); break;
             case kAudioDevicePropertyBufferFrameSize:

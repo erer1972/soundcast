@@ -49,6 +49,20 @@ struct MenuBarContentView: View {
             }
             .help("Delays this Mac's speakers (including Bluetooth) relative to AirPlay rooms. Increase if they play ahead of the Apple TVs, decrease if behind.")
 
+            HStack(alignment: .firstTextBaseline) {
+                Button(state.isCalibrating ? "Calibrating…" : "Calibrate Sync") {
+                    state.calibrateSync()
+                }
+                .disabled(state.isCalibrating)
+                .help("Plays a few clicks and listens with the microphone to line up this Mac's speakers with the Apple TVs. Pause other audio and keep the room quiet.")
+                if let status = state.calibrationStatus {
+                    Text(status)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Divider()
 
             Text("One source at a time: \"Cast Everything\" sends all Mac audio; \"SoundCast\" sends what plays to the SoundCast output (turning it on selects that output for you).")

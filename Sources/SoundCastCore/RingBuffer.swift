@@ -28,6 +28,10 @@ public final class RingBuffer: @unchecked Sendable {
     private var count = 0
     private var lock = os_unfair_lock()
     private var peakSinceTaken: Float = 0
+    // Onset timestamps (mach host time) for sync calibration; off when 0.
+    private var onsetThreshold: Float = 0
+    private var onsetHostTimes: [UInt64] = []
+    private var lastOnsetHostTime: UInt64 = 0
 
     public init(capacitySamples: Int) {
         capacity = capacitySamples
@@ -55,13 +59,22 @@ public final class RingBuffer: @unchecked Sendable {
     public func write(_ samples: UnsafePointer<Float>, count sampleCount: Int) {
         os_unfair_lock_lock(&lock)
         var peak = peakSinceTaken
+        var blockPeak: Float = 0
         for i in 0..<sampleCount {
             let sample = samples[i]
             storage[writeIndex] = sample
             writeIndex = (writeIndex + 1) % capacity
-            peak = max(peak, abs(sample))
+            blockPeak = max(blockPeak, abs(sample))
         }
+        peak = max(peak, blockPeak)
         peakSinceTaken = peak.isFinite ? peak : 0
+        if onsetThreshold > 0, blockPeak > onsetThreshold {
+            let now = mach_absolute_time()
+            if now &- lastOnsetHostTime > Self.hostTicks(seconds: 0.5) {
+                onsetHostTimes.append(now)
+                lastOnsetHostTime = now
+            }
+        }
         if count + sampleCount > capacity {
             // Overflow: the oldest samples were overwritten, so move the
             // read position up to the oldest surviving sample instead of
@@ -86,6 +99,29 @@ public final class RingBuffer: @unchecked Sendable {
             count = keepSamples
         }
         os_unfair_lock_unlock(&lock)
+    }
+
+    /// Starts recording the host time of each sharp onset written (a block
+    /// louder than `threshold` after at least 0.5 s), for sync calibration.
+    public func startOnsetDetection(threshold: Float) {
+        os_unfair_lock_lock(&lock)
+        onsetThreshold = threshold
+        onsetHostTimes = []
+        lastOnsetHostTime = 0
+        os_unfair_lock_unlock(&lock)
+    }
+
+    /// Stops onset detection and returns the recorded mach host times.
+    public func stopOnsetDetection() -> [UInt64] {
+        os_unfair_lock_lock(&lock)
+        defer { onsetThreshold = 0; onsetHostTimes = []; os_unfair_lock_unlock(&lock) }
+        return onsetHostTimes
+    }
+
+    private static func hostTicks(seconds: Double) -> UInt64 {
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        return UInt64(seconds * 1_000_000_000 * Double(info.denom) / Double(info.numer))
     }
 
     /// Loudest absolute sample written since the last call (for level

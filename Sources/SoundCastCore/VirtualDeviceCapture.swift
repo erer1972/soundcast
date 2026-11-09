@@ -31,9 +31,11 @@ public final class VirtualDeviceCapture {
         static let channelCount: UInt32 = 2
         static let sampleRateHz: UInt32 = 48_000
         // initialized, writeIndexFrames, capacityFrames, channelCount,
-        // sampleRateHz — 5 UInt32 fields, 4 bytes each, no padding
-        // (all naturally 4-byte aligned, sequential).
-        static let headerSizeBytes = 20
+        // sampleRateHz, latencyFrames — 6 UInt32 fields, 4 bytes each, no
+        // padding (all naturally 4-byte aligned, sequential).
+        static let headerSizeBytes = 24
+        static let latencyFieldIndex = 5
+        static let layoutVersion: UInt32 = 2
         static let totalSizeBytes = headerSizeBytes + Int(capacityFrames) * Int(channelCount) * MemoryLayout<Float>.size
     }
 
@@ -52,6 +54,9 @@ public final class VirtualDeviceCapture {
         /// bad data into it. Either way, refuse to trust it rather than
         /// read out-of-bounds based on unvalidated header fields.
         case headerValidationFailed(String)
+        /// The shared memory was made by an older driver (or the new one
+        /// hasn't replaced it yet). Retry; reinstall if it persists.
+        case outdatedLayout(UInt32)
     }
 
     /// All poll-loop mutable state lives here, not as captured local
@@ -132,6 +137,7 @@ public final class VirtualDeviceCapture {
     private var mappedPointer: UnsafeMutableRawPointer?
     private var pollThread: Thread?
     private var pollState: PollState?
+    private var headerIsWritable = false
 
     public init(ringBuffer: RingBuffer, preset: VirtualDevicePreset = .main) {
         self.outputRingBuffer = ringBuffer
@@ -139,19 +145,40 @@ public final class VirtualDeviceCapture {
     }
 
     public func start() throws {
-        let fd = soundcast_shm_open_readonly(preset.shmName)
+        // Read-write only so the app can publish latencyFrames; the audio
+        // itself is still only read.
+        var fd = soundcast_shm_open_readwrite(preset.shmName)
+        var writable = fd >= 0
+        if fd < 0, errno != ENOENT {
+            fd = soundcast_shm_open_readonly(preset.shmName)
+            writable = false
+        }
         guard fd >= 0 else { throw CaptureError.shmOpenFailed(errno) }
         fileDescriptor = fd
 
-        guard let mapped = mmap(nil, Layout.totalSizeBytes, PROT_READ, MAP_SHARED, fd, 0),
+        guard let mapped = mmap(nil, Layout.totalSizeBytes, writable ? PROT_READ | PROT_WRITE : PROT_READ, MAP_SHARED, fd, 0),
               mapped != MAP_FAILED else {
             close(fd)
             fileDescriptor = -1
             throw CaptureError.mmapFailed(errno)
         }
         mappedPointer = mapped
+        headerIsWritable = writable
 
         let header = mapped.assumingMemoryBound(to: UInt32.self)
+        // header[0] is the driver's layout version (see driver.c). An older
+        // driver's 5-field header would make every sample read 4 bytes off.
+        // Right after a driver update the previous driver's segment can
+        // still exist until the new driver's first IO replaces it, so this
+        // is reported as retryable rather than fatal.
+        let version = header[0]
+        guard version == Layout.layoutVersion else {
+            munmap(mapped, Layout.totalSizeBytes)
+            mappedPointer = nil
+            close(fd)
+            fileDescriptor = -1
+            throw CaptureError.outdatedLayout(version)
+        }
         let actualCapacity = header[2]
         let actualChannels = header[3]
         let actualSampleRate = header[4]
@@ -179,7 +206,19 @@ public final class VirtualDeviceCapture {
         pollThread = thread
     }
 
+    /// Publishes how long after reaching the SoundCast device the audio is
+    /// heard; the driver reports it as the device latency so video players
+    /// delay the picture to match. No-op if the segment isn't writable.
+    public func setReportedLatency(seconds: Double) {
+        guard headerIsWritable, let mapped = mappedPointer else { return }
+        let frames = UInt32(max(0, min(10, seconds)) * Double(Layout.sampleRateHz))
+        let field = mapped.assumingMemoryBound(to: UInt32.self).advanced(by: Layout.latencyFieldIndex)
+        field.pointee = frames
+        OSMemoryBarrier()
+    }
+
     public func stop() {
+        setReportedLatency(seconds: 0)
         if let state = pollState {
             state.shouldStop = true
             // Wait for the poll thread to actually finish its current

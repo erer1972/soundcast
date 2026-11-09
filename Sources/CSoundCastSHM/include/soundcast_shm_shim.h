@@ -8,5 +8,7 @@
 // thin, fixed-signature wrapper is the workaround (same one used for
 // the standalone C diagnostic tool, test_shm_flow.c, earlier).
 int soundcast_shm_open_readonly(const char *name);
+// Read-write, for the one header field the app writes (latencyFrames).
+int soundcast_shm_open_readwrite(const char *name);
 
 #endif

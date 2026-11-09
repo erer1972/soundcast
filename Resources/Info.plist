@@ -24,6 +24,8 @@
 	     microphone access, worded for what we're actually doing. -->
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>SoundCast needs to capture system audio so it can play what you're hearing on the speakers and rooms you select.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SoundCast listens to a few test clicks to line up your speakers (Calibrate). Nothing is recorded or sent anywhere.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>SoundCast discovers and connects to AirPlay receivers on your local network.</string>
 	<key>NSBonjourServices</key>

@@ -446,6 +446,93 @@ final class AppState: ObservableObject {
         }
     }
 
+    @Published private(set) var calibrationStatus: String?
+    @Published private(set) var isCalibrating = false
+
+    /// Measures how much later the AirPlay rooms are heard than this Mac's
+    /// speakers (clicks + microphone, see SyncCalibrator) and sets the
+    /// AirPlay Sync offset to match. Other rooms are muted per round and
+    /// every volume is restored afterwards.
+    func calibrateSync() {
+        guard !isCalibrating else { return }
+        guard let source = Self.allSources.first(where: { isActive($0) && runningSessions[$0] != nil }),
+              let session = runningSessions[source] else {
+            calibrationStatus = "Turn on a source first."
+            return
+        }
+        let selected = selectedDeviceIDsBySource[source] ?? []
+        let localIDs = localDevices.filter { selected.contains($0.id) }.map(\.id)
+        let airplayIDs = selected.filter { $0.hasPrefix("airplay:") && airplayCasts[source]?[$0]?.sender != nil }
+        guard !localIDs.isEmpty, !airplayIDs.isEmpty else {
+            calibrationStatus = "Tick at least one speaker on this Mac and one playing Apple TV."
+            return
+        }
+        let sonosReceivers = (sonosCasts[source]?.keys).map { Array($0) }?.compactMap { sonosReceiversByDeviceID[$0] } ?? []
+        isCalibrating = true
+        calibrationStatus = "Calibrating — pause other audio and stay quiet (about 25 s)…"
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            @MainActor func setLocal(muted: Bool) {
+                for id in localIDs {
+                    session.output.setGain(deviceID: id, gain: muted ? 0 : (self.perDeviceGainBySource[source]?[id] ?? 1))
+                }
+            }
+            @MainActor func setAirPlay(muted: Bool) {
+                for id in airplayIDs {
+                    let gain = (self.perDeviceGainBySource[source]?[id] ?? 1) * self.masterVolume
+                    self.airplayCasts[source]?[id]?.sender?.setVolume(muted ? 0 : gain)
+                }
+            }
+            @MainActor func setSonos(muted: Bool) async {
+                for receiver in sonosReceivers {
+                    let id = "sonos:\(receiver.id)"
+                    let gain = (self.perDeviceGainBySource[source]?[id] ?? 1) * self.masterVolume
+                    try? await SonosUPnPClient.setVolume(muted ? 0 : self.volume(gain: gain), for: receiver)
+                }
+            }
+            defer {
+                setLocal(muted: false)
+                setAirPlay(muted: false)
+                Task { await setSonos(muted: false) }
+                self.isCalibrating = false
+            }
+            do {
+                guard await SyncCalibrator.requestMicrophoneAccess() else { throw SyncCalibrator.CalibrationError.microphoneDenied }
+                let calibrator = SyncCalibrator(ring: session.ringBuffer)
+                await setSonos(muted: true)
+
+                setAirPlay(muted: true)
+                try await Task.sleep(nanoseconds: 2_500_000_000)  // let the mute reach the Apple TVs
+                let local = try await calibrator.measure()
+
+                setLocal(muted: true)
+                setAirPlay(muted: false)
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                let airplay = try await calibrator.measure()
+
+                let difference = (airplay - local) * 1000
+                // Local outputs are already aligned to AirPlay's nominal 2 s,
+                // so a real difference is a TV/receiver delay of a few
+                // hundred ms at most; anything bigger is a bad measurement.
+                guard abs(difference) < 1000, airplay > 1 else {
+                    throw SyncCalibrator.CalibrationError.implausible(differenceMilliseconds: Int(difference))
+                }
+                let wanted = self.syncOffsetMilliseconds + difference
+                NSLog("[SoundCast][Calibrate] local \(String(format: "%.3f", local)) s, AirPlay \(String(format: "%.3f", airplay)) s, offset \(self.syncOffsetMilliseconds) -> \(wanted) ms")
+                self.setSyncOffset(milliseconds: wanted)
+                if abs(wanted) > 500 {
+                    self.calibrationStatus = String(format: "Needed %+.0f ms, beyond the ±500 ms range; set to the limit.", wanted)
+                } else {
+                    self.calibrationStatus = String(format: "Calibrated: %+.0f ms (Apple TV was %+.0f ms vs. this Mac).", wanted, difference)
+                }
+            } catch {
+                self.calibrationStatus = "Calibration failed: \(error)"
+                NSLog("[SoundCast][Calibrate] failed: \(error)")
+            }
+        }
+    }
+
     /// Saves the offset at once; rebuilds affected local outputs once the
     /// slider has been still for a moment (each rebuild re-buffers).
     func setSyncOffset(milliseconds: Double) {
@@ -546,6 +633,7 @@ final class AppState: ObservableObject {
     /// driver creates it on first use) are retried once a second until it
     /// appears, the user switches the source off, or a different error hits.
     private var retryTasks: [CastSource: Task<Void, Never>] = [:]
+    private var outdatedDriverSources: Set<CastSource> = []
 
     private func startSession(_ source: CastSource) {
         switch attemptStart(source) {
@@ -554,7 +642,9 @@ final class AppState: ObservableObject {
         case .waitingForDriver:
             // Show it as on ("armed") so the toggle reflects the user's intent.
             activeSources.insert(source)
-            lastErrorBySource[source] = "Waiting for audio to be played to \"\(source.displayName)\"…"
+            lastErrorBySource[source] = outdatedDriverSources.contains(source)
+                ? "Waiting for the updated SoundCast driver — play something to \"\(source.displayName)\". If this stays, reinstall the driver."
+                : "Waiting for audio to be played to \"\(source.displayName)\"…"
             retryTasks[source] = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -608,6 +698,7 @@ final class AppState: ObservableObject {
             }
             activeSources.insert(source)
             lastErrorBySource[source] = nil
+            outdatedDriverSources.remove(source)
             updateLevelMetering()
             return .started
         } catch {
@@ -616,6 +707,11 @@ final class AppState: ObservableObject {
             if case .virtualDevice = source,
                case VirtualDeviceCapture.CaptureError.shmOpenFailed(let code) = error,
                code == ENOENT {
+                return .waitingForDriver
+            }
+            if case .virtualDevice = source,
+               case VirtualDeviceCapture.CaptureError.outdatedLayout = error {
+                outdatedDriverSources.insert(source)
                 return .waitingForDriver
             }
             lastErrorBySource[source] = "Failed to start: \(error)"
@@ -652,6 +748,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Tells the SoundCast device how late its audio is heard, so video
+    /// players (Safari, Chrome, QuickTime) delay the picture to match:
+    /// the later of the local outputs and the AirPlay rooms. Sonos is not
+    /// counted yet (its buffering hasn't been measured).
+    private func publishLatency(for source: CastSource, outputEngine: LocalOutputEngine, selected: Set<String>) {
+        guard let capture = runningSessions[source]?.capture as? VirtualDeviceCapture else { return }
+        var latency = outputEngine.heardLatencySeconds
+        if selected.contains(where: { $0.hasPrefix("airplay:") }) {
+            latency = max(latency, AirPlayRealtimeSender.playbackLatencySeconds + max(0, syncOffsetMilliseconds / 1000))
+        }
+        capture.setReportedLatency(seconds: latency)
+        NSLog("[SoundCast][AppState] reporting \(String(format: "%.3f", latency)) s latency on \(source.displayName)")
+    }
+
     private func applySelection(on outputEngine: LocalOutputEngine, for source: CastSource) throws {
         let selected = selectedDeviceIDsBySource[source] ?? []
         syncAirPlay(for: source, selected: selected)
@@ -660,6 +770,7 @@ final class AppState: ObservableObject {
         let targets = localDevices
             .filter { selected.contains($0.id) }
             .map { LocalOutputEngine.Target(device: $0, gain: gains[$0.id] ?? 1.0) }
+        defer { publishLatency(for: source, outputEngine: outputEngine, selected: selected) }
         guard !targets.isEmpty else {
             outputEngine.stop()
             return
