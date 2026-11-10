@@ -1,6 +1,6 @@
 # SoundCast
 
-Status (2026-11-10, v0.1.0 pre-release): **AirPlay 2, Sonos S1, Bluetooth
+Status (2026-11-10, v0.1.1 pre-release): **AirPlay 2, Sonos S1, Bluetooth
 and local casting work in the app.** Tested on a Mac Pro 5,1 and an Intel
 MacBook Pro (both macOS 26) with three Apple TVs, a Sonos SYMFONISK speaker
 and a Bluetooth speaker.
@@ -27,8 +27,11 @@ and a Bluetooth speaker.
   from dropped connections (answers its `Range` reconnects with `206`) and
   streams from a small reserve, so Wi-Fi jitter doesn't cause gaps. The
   device list follows speakers as they connect and disconnect.
-- **UI:** menu bar window plus an always-on-top floating panel with live
-  level meters; adjustable transparency for both. Single instance.
+- **UI:** menu bar window plus an always-on-top, resizable floating panel
+  with live level meters; adjustable transparency for both. Single instance.
+  Rooms, volumes and the Casting switch are remembered between launches.
+- **Apple TV screen:** shows a SoundCast "Now Playing" screen (so its
+  screen saver can start) instead of staying black.
 
 Known issues / not done yet: Sonos is not yet aligned with the other rooms;
 two Macs casting to one AirPlay room keep taking it from each other;
