@@ -683,6 +683,11 @@ final class AppState: ObservableObject {
                 ? "Waiting for the updated SoundCast driver — play something to \"\(source.displayName)\". If this stays, reinstall the driver."
                 : "Waiting for audio to be played to \"\(source.displayName)\"…"
             let waitStarted = Date()
+            if source == Self.mainSource, outdatedDriverSources.contains(source) {
+                // Probably just a leftover buffer from the previous driver:
+                // a moment of silence makes the installed driver replace it.
+                Task.detached { VirtualDeviceCapture.wakeDriver() }
+            }
             retryTasks[source] = Task { [weak self] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)

@@ -156,7 +156,7 @@ public enum SystemOutputDevice {
 
     public static func exists(uid: String) -> Bool { deviceID(forUID: uid) != nil }
 
-    private static func deviceID(forUID uid: String) -> AudioObjectID? {
+    static func deviceID(forUID uid: String) -> AudioObjectID? {
         var translate = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
