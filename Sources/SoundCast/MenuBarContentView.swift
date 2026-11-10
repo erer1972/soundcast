@@ -121,6 +121,15 @@ struct MenuBarContentView: View {
                 set: { state.setLaunchAtLogin($0) }
             ))
 
+            if let address = state.webControlAddress, let url = URL(string: address) {
+                HStack(spacing: 4) {
+                    Text("Web control:")
+                    Link(address.replacingOccurrences(of: "http://", with: ""), destination: url)
+                }
+                .font(.caption)
+                .help("Open this address on a phone or tablet on your home network to control SoundCast.")
+            }
+
             Button("Refresh Devices") {
                 state.refreshDeviceList()
             }

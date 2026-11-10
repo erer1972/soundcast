@@ -553,6 +553,10 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Web control page (see WebControl.swift); address shown in the menu.
+    var webControl: WebControlServer?
+    @Published var webControlAddress: String?
+
     @Published private(set) var calibrationStatus: String?
     @Published private(set) var isCalibrating = false
 
