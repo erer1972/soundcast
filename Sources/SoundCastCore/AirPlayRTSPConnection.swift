@@ -107,7 +107,9 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
         connection = NWConnection(host: host, port: port, using: .tcp)
     }
 
-    public func connect() async throws {
+    /// `timeout`: a receiver that's off the network leaves the connection
+    /// "waiting" forever, so give up and let the caller retry.
+    public func connect(timeout: TimeInterval = 10) async throws {
         // NWConnection can report a terminal state (e.g. .failed) more
         // than once for the same attempt — resume exactly once
         // regardless (see AirPlayAudioStream.connect()'s identical
@@ -142,6 +144,12 @@ public final class AirPlayRTSPConnection: @unchecked Sendable {
                 }
             }
             connection.start(queue: .main)
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [connection] in
+                guard !resumeGuard.didResume else { return }
+                resumeGuard.didResume = true
+                connection.cancel()
+                continuation.resume(throwing: ConnectionError.connectFailed("timed out after \(Int(timeout)) s"))
+            }
         }
     }
 

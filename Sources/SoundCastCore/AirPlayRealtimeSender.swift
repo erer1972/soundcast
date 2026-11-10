@@ -110,7 +110,13 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
     public func start() async throws {
         try ptpClock.addPeer(ipv4: receiver.ipv4)
         do {
-            try await establishSession()
+            // Bounded: a receiver that drops off mid-setup would otherwise
+            // leave this (and the room's retry loop) waiting forever.
+            do {
+                try await withTimeout(seconds: 25) { try await self.establishSession() }
+            } catch is CancellationError {
+                throw SenderError.sessionLost("timed out setting up the session")
+            }
         } catch {
             await tearDownSession(sendTeardown: false)
             throw error

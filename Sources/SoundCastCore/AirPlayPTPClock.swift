@@ -415,9 +415,25 @@ public final class AirPlayPTPClock: @unchecked Sendable {
             }
         }
         if sent != packet.count {
-            NSLog("[SoundCast][AirPlayPTP] UDP send failed: %s", strerror(errno))
+            let reason = String(cString: strerror(errno))
+            // A receiver that's off the network fails every send (~15/s);
+            // log the first failure, then at most a summary every 30 s.
+            let now = DispatchTime.now().uptimeNanoseconds
+            let summary = sendFailureLock.withLock { () -> Int? in
+                sendFailuresSinceLog += 1
+                guard now &- lastSendFailureLog >= 30_000_000_000 || lastSendFailureLog == 0 else { return nil }
+                defer { sendFailuresSinceLog = 0; lastSendFailureLog = now }
+                return sendFailuresSinceLog
+            }
+            if let summary {
+                NSLog("[SoundCast][AirPlayPTP] UDP send failed: \(reason) (\(summary) failure(s) since last report)")
+            }
         }
     }
+
+    private let sendFailureLock = NSLock()
+    private var sendFailuresSinceLog = 0
+    private var lastSendFailureLog: UInt64 = 0
 
     private static func openSocket(port: UInt16, localAddress: String) throws -> Int32 {
         let socket = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
