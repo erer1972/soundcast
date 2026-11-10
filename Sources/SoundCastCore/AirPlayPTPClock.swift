@@ -155,7 +155,9 @@ public final class AirPlayPTPClock: @unchecked Sendable {
                 guard let self, self.running else { return }
                 sendSync()
                 let now = Self.nowNanoseconds()
-                if now - lastAnnounceNs >= 1_000_000_000 {
+                // Wall-clock time: it can step backwards (time sync), so
+                // never subtract a later value from an earlier one.
+                if now < lastAnnounceNs || now - lastAnnounceNs >= 1_000_000_000 {
                     sendAnnounce()
                     sendSignaling()
                     lastAnnounceNs = now
