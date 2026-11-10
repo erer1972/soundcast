@@ -33,7 +33,12 @@ and a Bluetooth speaker.
 Known issues / not done yet: Sonos is not yet aligned with the other rooms;
 two Macs casting to one AirPlay room keep taking it from each other;
 receiver-initiated AirPlay stop/restart isn't handled. The app and driver
-are self-signed (no notarization), so you build them from source.
+are self-signed (no notarization).
+
+**Download:** Intel Macs can install the ready-made build from the
+[Releases page](https://github.com/erer1972/soundcast/releases): unzip it and
+run `bash install.sh` in Terminal. To make that zip yourself, run
+`./scripts/package_release.sh` on an Intel Mac.
 
 See `docs/DESIGN.md` for the full architecture, the research behind the
 AirPlay 2 and HAL-driver decisions, and the phase plan.
