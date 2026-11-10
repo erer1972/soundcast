@@ -33,8 +33,7 @@ struct MenuBarContentView: View {
                         get: { state.syncOffsetMilliseconds },
                         set: { state.setSyncOffset(milliseconds: $0) }
                     ),
-                    in: -500...500,
-                    step: 10
+                    in: -500...500
                 )
                 Text(String(format: "%+.0f ms", state.syncOffsetMilliseconds))
                     .font(.caption.monospacedDigit())
@@ -56,8 +55,7 @@ struct MenuBarContentView: View {
                         get: { state.videoSyncMilliseconds },
                         set: { state.setVideoSync(milliseconds: $0) }
                     ),
-                    in: -500...500,
-                    step: 10
+                    in: -500...500
                 )
                 Text(String(format: "%+.0f ms", state.videoSyncMilliseconds))
                     .font(.caption.monospacedDigit())

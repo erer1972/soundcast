@@ -473,7 +473,9 @@ final class AppState: ObservableObject {
         UserDefaults.standard.double(forKey: "VideoSyncMilliseconds")
 
     func setVideoSync(milliseconds: Double) {
-        let value = max(-500, min(500, milliseconds.rounded()))
+        // 10 ms steps, rounded here: SwiftUI's own Slider `step:` crashed
+        // while redrawing the menu.
+        let value = max(-500, min(500, (milliseconds / 10).rounded() * 10))
         guard value != videoSyncMilliseconds else { return }
         videoSyncMilliseconds = value
         UserDefaults.standard.set(value, forKey: "VideoSyncMilliseconds")
@@ -573,7 +575,9 @@ final class AppState: ObservableObject {
     /// Saves the offset at once; rebuilds affected local outputs once the
     /// slider has been still for a moment (each rebuild re-buffers).
     func setSyncOffset(milliseconds: Double) {
-        let value = max(-500, min(500, milliseconds.rounded()))
+        // 10 ms steps, rounded here: SwiftUI's own Slider `step:` crashed
+        // while redrawing the menu.
+        let value = max(-500, min(500, (milliseconds / 10).rounded() * 10))
         guard value != syncOffsetMilliseconds else { return }
         syncOffsetMilliseconds = value
         UserDefaults.standard.set(value, forKey: Self.syncOffsetKey)
