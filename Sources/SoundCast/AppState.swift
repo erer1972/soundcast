@@ -142,6 +142,8 @@ final class AppState: ObservableObject {
     init() {
         // A previous run that switched the output and then crashed.
         restoreSystemOutput()
+        let restoreSettings = !CommandLine.arguments.contains { $0 == "--cast-airplay" || $0 == "--cast-sonos" }
+        if restoreSettings { restoreSavedSettings() }
         watchLocalDevices()
         airPlayDiscovery.$receivers
             .sink { [weak self] receivers in
@@ -181,6 +183,58 @@ final class AppState: ObservableObject {
         airPlayDiscovery.start()
         sonosDiscovery.start()
         setUpLaunchArgumentCasting()
+        if restoreSettings && UserDefaults.standard.bool(forKey: Saved.castingOn) {
+            NSLog("[SoundCast][AppState] resuming casting from the last run")
+            DispatchQueue.main.async { [weak self] in self?.setCasting(true) }
+        }
+    }
+
+    // MARK: - Remembered settings (rooms, volumes, Casting switch)
+
+    private enum Saved {
+        static let rooms = "SavedRooms"
+        static let gains = "SavedRoomGains"
+        static let masterVolume = "SavedMasterVolume"
+        static let castingOn = "SavedCastingOn"
+    }
+
+    /// Rooms from the last run that haven't been found on this run yet.
+    /// Each one is ticked again as soon as it appears (AirPlay, Sonos and
+    /// Bluetooth devices show up a few seconds after launch).
+    private var pendingRoomIDs: Set<String> = []
+
+    private func restoreSavedSettings() {
+        let defaults = UserDefaults.standard
+        pendingRoomIDs = Set(defaults.stringArray(forKey: Saved.rooms) ?? [])
+        if let gains = defaults.dictionary(forKey: Saved.gains) as? [String: Double] {
+            perDeviceGainBySource[Self.mainSource] = gains.mapValues { Float($0) }
+        }
+        if let volume = defaults.object(forKey: Saved.masterVolume) as? Double {
+            masterVolume = Float(volume)
+        }
+    }
+
+    /// Ticks remembered rooms that have just appeared.
+    private func claimPendingRooms() {
+        guard !pendingRoomIDs.isEmpty else { return }
+        let found = (localDevices + airplayDevices + sonosDevices).map(\.id).filter { pendingRoomIDs.contains($0) }
+        guard !found.isEmpty else { return }
+        pendingRoomIDs.subtract(found)
+        selectedDeviceIDsBySource[Self.mainSource, default: []].formUnion(found)
+        if isActive(Self.mainSource) { applySelectionToRunningOutput(for: Self.mainSource) }
+        mirrorSelectionToFallback()
+    }
+
+    /// Sonos volumes aren't saved: the speaker keeps its own.
+    private func saveSettings() {
+        let defaults = UserDefaults.standard
+        let rooms = (selectedDeviceIDsBySource[Self.mainSource] ?? []).union(pendingRoomIDs)
+        defaults.set(rooms.sorted(), forKey: Saved.rooms)
+        let gains = (perDeviceGainBySource[Self.mainSource] ?? [:])
+            .filter { !$0.key.hasPrefix("sonos:") }
+            .mapValues { Double($0) }
+        defaults.set(gains, forKey: Saved.gains)
+        defaults.set(Double(masterVolume), forKey: Saved.masterVolume)
     }
 
     /// Test hook for driving the app headless (e.g. over ssh):
@@ -263,6 +317,7 @@ final class AppState: ObservableObject {
     var castingSource: CastSource { activeSources.first ?? Self.mainSource }
 
     func setCasting(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Saved.castingOn)
         if on {
             guard !isCasting else { return }
             if SystemOutputDevice.exists(uid: VirtualDevicePreset.main.deviceUID) {
@@ -395,6 +450,7 @@ final class AppState: ObservableObject {
                 perDeviceGainBySource[source, default: [:]][device.id] = 1.0
             }
         }
+        claimPendingRooms()
     }
 
     /// Publishes AirPlay receivers, leaving out Sonos speakers (by their
@@ -419,6 +475,7 @@ final class AppState: ObservableObject {
             selectedDeviceIDsBySource[source]?.subtract(hidden)
             if isActive(source) { applySelectionToRunningOutput(for: source) }
         }
+        claimPendingRooms()
     }
 
     /// "RINCON_804AF2D0F61A01400" -> "804AF2D0F61A".
@@ -452,11 +509,15 @@ final class AppState: ObservableObject {
         if isActive(source) {
             applySelectionToRunningOutput(for: source)
         }
-        if source == Self.mainSource { mirrorSelectionToFallback() }
+        if source == Self.mainSource {
+            mirrorSelectionToFallback()
+            saveSettings()
+        }
     }
 
     func setGain(for device: SoundDevice, source: CastSource, gain: Float) {
         perDeviceGainBySource[source, default: [:]][device.id] = gain
+        if source == Self.mainSource { saveSettings() }
         runningSessions[source]?.output.setGain(deviceID: device.id, gain: gain)
         airplayCasts[source]?[device.id]?.sender?.setVolume(gain * masterVolume)
         if sonosCasts[source]?[device.id] != nil {
@@ -594,6 +655,7 @@ final class AppState: ObservableObject {
 
     func setMasterVolume(_ volume: Float) {
         masterVolume = volume
+        saveSettings()
         for session in runningSessions.values {
             session.output.masterGain = volume
         }
