@@ -1056,6 +1056,7 @@ final class AppState: ObservableObject {
                     source: mirror, inputSampleRate: inputRate
                 )
                 sender.setVolume(volume)
+                sender.nowPlaying = NowPlayingArtwork.info
                 sender.onFailure = { [weak self] error in
                     Task { @MainActor in self?.airPlayFailed(deviceID: deviceID, source: source, error: error) }
                 }

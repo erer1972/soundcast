@@ -29,9 +29,28 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
         }
     }
 
+    /// What the receiver shows on its "Now Playing" screen.
+    public struct NowPlaying: Sendable {
+        public var title: String
+        public var artist: String
+        public var album: String
+        /// PNG image shown as cover art; nil to send text only.
+        public var artworkPNG: Data?
+
+        public init(title: String, artist: String, album: String, artworkPNG: Data?) {
+            self.title = title
+            self.artist = artist
+            self.album = album
+            self.artworkPNG = artworkPNG
+        }
+    }
+
     public let receiver: AirPlayResolvedReceiver
     /// Called (on an arbitrary thread) if the session dies after start.
     public var onFailure: (@Sendable (Error) -> Void)?
+    /// Set before `start()`; sent once audio is flowing, so an Apple TV
+    /// shows a Now Playing screen instead of staying black.
+    public var nowPlaying: NowPlaying?
 
     private let identity: AirPlayIdentity
     private let ptpClock: AirPlayPTPClock
@@ -62,6 +81,8 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
     private var keepAliveTask: Task<Void, Never>?
     private var pendingVolume: Float = 1.0
     private var audioStream: AirPlayRealtimeAudioStream?
+    /// RTP timestamp of the first frame, once the stream thread has picked it.
+    private var streamStartTimestamp: UInt32?
 
     /// Packets resent on the receiver's request / requests we couldn't
     /// serve because the packet had already left the history.
@@ -118,6 +139,9 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
         thread.qualityOfService = .userInteractive
         streamThread = thread
         thread.start()
+        if let nowPlaying {
+            Task { [weak self] in await self?.sendNowPlaying(nowPlaying) }
+        }
         keepAliveTask = Task { [weak self] in
             while !Task.isCancelled {
                 // 5 s (OwnTones uses 25 s) so a receiver that vanished
@@ -245,6 +269,58 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
         }
     }
 
+    // MARK: - Now Playing metadata
+
+    /// Title/artist/album (DMAP) and cover art, the way AirPlay senders
+    /// (e.g. OwnTone) send them: SET_PARAMETER tagged with the stream's
+    /// RTP start time. Best effort: a receiver that refuses them still
+    /// plays the audio.
+    private func sendNowPlaying(_ info: NowPlaying) async {
+        // The stream thread picks the RTP start after priming (<= 1 s).
+        var rtpTime: UInt32?
+        for _ in 0..<150 {
+            rtpTime = stateLock.withLock { streamStartTimestamp }
+            if rtpTime != nil || !isRunning { break }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard let rtpTime, isRunning else { return }
+        let name = receiver.serviceName
+        let items: [(String, [UInt8])] = [
+            ("application/x-dmap-tagged", Self.dmapMetadata(title: info.title, artist: info.artist, album: info.album)),
+        ] + (info.artworkPNG.map { [("image/png", Array($0))] } ?? [])
+        for (contentType, body) in items {
+            do {
+                let status = try await rtsp.run { () -> Int in
+                    guard let connection = self.connection, !self.requestTarget.isEmpty else { throw SenderError.stopped }
+                    return try await connection.send(
+                        method: "SET_PARAMETER", path: self.requestTarget,
+                        extraHeaders: AirPlayStreamSetup.streamHeaders.merging(
+                            ["Content-Type": contentType, "RTP-Info": "rtptime=\(rtpTime)"]) { _, new in new },
+                        body: body
+                    ).statusCode
+                }
+                if status != 200 {
+                    NSLog("[SoundCast][AirPlay] \(name): Now Playing \(contentType) refused (\(status))")
+                }
+            } catch {
+                NSLog("[SoundCast][AirPlay] \(name): Now Playing \(contentType) not sent (\(error))")
+                return
+            }
+        }
+    }
+
+    /// DMAP `mlit` item with `minm` (title), `asar` (artist), `asal` (album).
+    static func dmapMetadata(title: String, artist: String, album: String) -> [UInt8] {
+        func tag(_ code: String, _ payload: [UInt8]) -> [UInt8] {
+            let length = UInt32(payload.count)
+            return Array(code.utf8)
+                + [UInt8(length >> 24), UInt8(length >> 16 & 0xFF), UInt8(length >> 8 & 0xFF), UInt8(length & 0xFF)]
+                + payload
+        }
+        let fields = tag("minm", Array(title.utf8)) + tag("asar", Array(artist.utf8)) + tag("asal", Array(album.utf8))
+        return tag("mlit", fields)
+    }
+
     private func sendFeedback() async throws {
         guard let connection else { throw SenderError.stopped }
         let response = try await connection.send(method: "POST", path: "/feedback", extraHeaders: AirPlayStreamSetup.streamHeaders)
@@ -318,6 +394,7 @@ public final class AirPlayRealtimeSender: @unchecked Sendable {
         }
 
         let startTimestamp = UInt32.random(in: 0...UInt32.max)
+        stateLock.withLock { streamStartTimestamp = startTimestamp }
         var nextTimestamp = startTimestamp
         let anchorUptime = DispatchTime.now().uptimeNanoseconds
         let anchorClock = AirPlayPTPClock.now()
