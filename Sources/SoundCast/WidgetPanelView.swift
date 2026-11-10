@@ -20,10 +20,7 @@ struct WidgetPanelView: View {
             if controller.isExpanded { expanded } else { compact }
         }
         .padding(14)
-        .frame(
-            width: controller.isExpanded ? FloatingPanelController.expandedSize.width : FloatingPanelController.compactSize.width,
-            height: controller.isExpanded ? FloatingPanelController.expandedSize.height : FloatingPanelController.compactSize.height
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background {
             // Lower opacity lets more of the desktop through the blur.
             RoundedRectangle(cornerRadius: 22, style: .continuous)
@@ -106,6 +103,13 @@ struct WidgetPanelView: View {
 
     // MARK: - Compact
 
+    /// How many rooms fit in the compact list: 3 at the default height,
+    /// one more for every ~30 pt the panel is dragged taller.
+    private var compactRows: Int {
+        let extra = controller.size.height - FloatingPanelController.compactSize.height
+        return max(2, 3 + Int((extra / 30).rounded(.down)))
+    }
+
     private var compact: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 14) {
@@ -124,11 +128,11 @@ struct WidgetPanelView: View {
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(state.activeDevices.prefix(3)) { device in
+                        ForEach(state.activeDevices.prefix(compactRows)) { device in
                             DeviceLine(device: device, level: state.isCasting ? state.level(for: device) : 0)
                         }
-                        if state.activeDevices.count > 3 {
-                            Text("+\(state.activeDevices.count - 3) more")
+                        if state.activeDevices.count > compactRows {
+                            Text("+\(state.activeDevices.count - compactRows) more")
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
