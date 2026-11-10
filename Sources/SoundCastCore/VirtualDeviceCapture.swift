@@ -1,3 +1,4 @@
+import CoreAudio
 import CSoundCastSHM
 import Foundation
 
@@ -204,6 +205,26 @@ public final class VirtualDeviceCapture {
         thread.name = "com.soundcast.virtualdevicecapture.poll"
         thread.start()
         pollThread = thread
+    }
+
+    /// Runs the SoundCast device for a moment with silence. The driver only
+    /// creates (or replaces an older driver's) shared buffer when audio
+    /// starts, so after a driver update a stale buffer can linger until
+    /// something plays; this makes the driver replace it now. Blocks for
+    /// `seconds`; call off the main thread.
+    public static func wakeDriver(preset: VirtualDevicePreset = .main, seconds: Double = 0.5) {
+        guard let deviceID = SystemOutputDevice.deviceID(forUID: preset.deviceUID) else { return }
+        var procID: AudioDeviceIOProcID?
+        let status = AudioDeviceCreateIOProcIDWithBlock(&procID, deviceID, nil) { _, _, _, output, _ in
+            for buffer in UnsafeMutableAudioBufferListPointer(output) {
+                if let data = buffer.mData { memset(data, 0, Int(buffer.mDataByteSize)) }
+            }
+        }
+        guard status == noErr, let procID else { return }
+        AudioDeviceStart(deviceID, procID)
+        Thread.sleep(forTimeInterval: seconds)
+        AudioDeviceStop(deviceID, procID)
+        AudioDeviceDestroyIOProcID(deviceID, procID)
     }
 
     /// Publishes how long after reaching the SoundCast device the audio is
