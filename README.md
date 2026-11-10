@@ -1,25 +1,26 @@
 # SoundCast
 
-Status (2026-11-09): **Phases 1 and 1.5 done; AirPlay 2 and Sonos S1 casting
-work in the app.** Tested on a Mac Pro 5,1 and an Intel MacBook Pro
-(both macOS 26) with three Apple TVs, a Sonos SYMFONISK speaker and a
-Bluetooth speaker.
+Status (2026-11-10, v0.1.0 pre-release): **AirPlay 2, Sonos S1, Bluetooth
+and local casting work in the app.** Tested on a Mac Pro 5,1 and an Intel
+MacBook Pro (both macOS 26) with three Apple TVs, a Sonos SYMFONISK speaker
+and a Bluetooth speaker.
 
-- **Sources (one at a time):**
-  - **SoundCast** — a system-wide virtual output device (HAL driver in
-    `HALPlugin/`). Turning this source on switches the Mac's output to it
-    and restores your previous output when it's turned off or the app quits.
-    The device has its own volume and mute, so the Mac's volume keys and
-    Sound menu slider work while it's selected.
-  - **Cast Everything** — captures all Mac audio with a process tap (and
-    mutes it locally while casting).
+- **One Casting switch:** turning it on switches the Mac's output to the
+  **SoundCast** virtual device (HAL driver in `HALPlugin/`) and restores your
+  previous output when it's turned off or the app quits. The device has its
+  own volume and mute, so the Mac's volume keys and Sound menu slider work.
+  If the driver isn't installed (or is out of date), SoundCast falls back to
+  capturing all Mac audio with a process tap.
 - **Rooms:** any local Core Audio output (built-in, wired, USB, Bluetooth),
   AirPlay 2 receivers (Apple TVs, with PIN pairing) and Sonos S1 speakers
   (live WAV over HTTP; no pairing). Tick several at once.
 - **Sync:** AirPlay rooms play a fixed 2.0 s after capture; local outputs
   are held back by the same amount (minus the device's own reported delay)
-  so they play together. An **AirPlay Sync** slider fine-tunes the rest.
-  Sonos is not yet aligned with the other rooms.
+  so they play together. An **AirPlay Sync** slider fine-tunes the rest, and
+  **Calibrate** measures it automatically with the Mac's microphone.
+- **Lip sync:** the driver reports the casting delay to macOS, so video
+  players (Safari, Chrome, QuickTime) delay the picture to match. A
+  **Video Sync** slider fine-tunes it.
 - **Local output:** rate conversion to the device's rate (e.g. 44.1 kHz
   Bluetooth) with drift control, so Bluetooth speakers don't stutter.
 - **Robustness:** AirPlay retries after a dropped session; Sonos recovers
@@ -29,10 +30,10 @@ Bluetooth speaker.
 - **UI:** menu bar window plus an always-on-top floating panel with live
   level meters; adjustable transparency for both. Single instance.
 
-Not done yet: making video players wait for the delayed audio (the driver
-reports zero latency), aligning Sonos with the other rooms, handling another
-sender taking over an AirPlay room (two Macs on one room keep taking it from
-each other), and receiver-initiated AirPlay stop/restart.
+Known issues / not done yet: Sonos is not yet aligned with the other rooms;
+two Macs casting to one AirPlay room keep taking it from each other;
+receiver-initiated AirPlay stop/restart isn't handled. The app and driver
+are self-signed (no notarization), so you build them from source.
 
 See `docs/DESIGN.md` for the full architecture, the research behind the
 AirPlay 2 and HAL-driver decisions, and the phase plan.
@@ -191,9 +192,8 @@ unverified.
 
 ## Using it
 
-- **Sources**: "Cast Everything" or "SoundCast" — one at a time (turning
-  one on turns the other off). The floating panel's main switch resumes the
-  last one, or "SoundCast" the first time.
+- **Casting**: one switch. On: the Mac's output moves to SoundCast and
+  plays in the ticked rooms. Off: your previous output comes back.
 - **Device list**: grouped "This Mac" / "Bluetooth" / "AirPlay" / "Sonos".
   Click a device to tick/untick it; tick several at once. An Apple TV that
   isn't paired yet shows **Pair…** (enter the PIN shown on the TV; each Mac
@@ -204,7 +204,10 @@ unverified.
 - **Master Volume**: overall gain on top of every device's own slider. With
   the SoundCast output selected, the Mac's volume keys also work.
 - **AirPlay Sync**: −500…+500 ms; move right if this Mac's speakers play
-  ahead of the Apple TVs, left if behind.
+  ahead of the Apple TVs, left if behind. **Calibrate** sets it for you:
+  it plays a few clicks and listens with the Mac's microphone.
+- **Video Sync**: −500…+500 ms on top of the delay reported to video
+  players; move it if lips and voices still don't line up.
 - **Transparency**: how see-through the menu and floating panel are.
 - **Launch at Login**: standard `SMAppService` toggle, no helper app.
 - **Refresh Devices**: re-scans Core Audio's device list (e.g. after
