@@ -469,10 +469,17 @@ final class AppState: ObservableObject {
             SoundDevice(id: "airplay:\(receiver.id)", name: receiver.name, category: .airplay, audioObjectID: nil)
         }
         let visibleIDs = Set(airplayDevices.map(\.id))
+        let discoveredIDs = Set(discoveredAirPlayReceivers.map { "airplay:\($0.id)" })
         for source in Self.allSources {
             let hidden = (selectedDeviceIDsBySource[source] ?? []).filter { $0.hasPrefix("airplay:") && !visibleIDs.contains($0) }
             guard !hidden.isEmpty else { continue }
             selectedDeviceIDsBySource[source]?.subtract(hidden)
+            // A room that dropped off the network (e.g. an Apple TV
+            // restarting or updating its status) is ticked again when it
+            // comes back; one hidden on purpose (a Sonos's AirPlay side) isn't.
+            if source == Self.mainSource {
+                pendingRoomIDs.formUnion(hidden.filter { !discoveredIDs.contains($0) })
+            }
             if isActive(source) { applySelectionToRunningOutput(for: source) }
         }
         claimPendingRooms()
