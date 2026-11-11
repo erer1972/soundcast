@@ -1,6 +1,7 @@
 import SwiftUI
 import SoundCastCore
 
+@MainActor
 struct MenuBarContentView: View {
     @ObservedObject var state: AppState
     @ObservedObject var panel: FloatingPanelController

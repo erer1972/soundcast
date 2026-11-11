@@ -5,6 +5,7 @@ import SoundCastCore
 /// mockup). Compact shows casting state, master volume and active
 /// devices; expanded adds per-source switches and per-device volume.
 /// Choosing which devices are ticked stays in the menu bar window.
+@MainActor
 struct WidgetPanelView: View {
     @ObservedObject var state: AppState
     @ObservedObject var controller: FloatingPanelController

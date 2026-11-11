@@ -58,6 +58,9 @@ public final class VirtualDeviceCapture {
         /// The shared memory was made by an older driver (or the new one
         /// hasn't replaced it yet). Retry; reinstall if it persists.
         case outdatedLayout(UInt32)
+        /// The driver has created the segment but not yet sized or
+        /// initialized it. Retry shortly.
+        case notReady
     }
 
     /// All poll-loop mutable state lives here, not as captured local
@@ -146,6 +149,9 @@ public final class VirtualDeviceCapture {
     }
 
     public func start() throws {
+        // A second start would leak the mapping and run two writers on one ring.
+        guard pollState == nil else { return }
+
         // Read-write only so the app can publish latencyFrames; the audio
         // itself is still only read.
         var fd = soundcast_shm_open_readwrite(preset.shmName)
@@ -155,30 +161,51 @@ public final class VirtualDeviceCapture {
             writable = false
         }
         guard fd >= 0 else { throw CaptureError.shmOpenFailed(errno) }
-        fileDescriptor = fd
+
+        // The driver creates the segment (size 0) before ftruncate()-ing it;
+        // touching mapped pages past the object's end raises SIGBUS.
+        var info = stat()
+        guard fstat(fd, &info) == 0 else {
+            let code = errno
+            close(fd)
+            throw CaptureError.shmOpenFailed(code)
+        }
+        let segmentSize = Int(info.st_size)
+        guard segmentSize >= Layout.headerSizeBytes else {
+            close(fd)
+            throw CaptureError.notReady
+        }
 
         guard let mapped = mmap(nil, Layout.totalSizeBytes, writable ? PROT_READ | PROT_WRITE : PROT_READ, MAP_SHARED, fd, 0),
               mapped != MAP_FAILED else {
+            let code = errno
             close(fd)
-            fileDescriptor = -1
-            throw CaptureError.mmapFailed(errno)
+            throw CaptureError.mmapFailed(code)
         }
-        mappedPointer = mapped
-        headerIsWritable = writable
+        func release() {
+            munmap(mapped, Layout.totalSizeBytes)
+            close(fd)
+        }
 
         let header = mapped.assumingMemoryBound(to: UInt32.self)
         // header[0] is the driver's layout version (see driver.c). An older
         // driver's 5-field header would make every sample read 4 bytes off.
         // Right after a driver update the previous driver's segment can
         // still exist until the new driver's first IO replaces it, so this
-        // is reported as retryable rather than fatal.
+        // is reported as retryable rather than fatal. 0 means the driver
+        // hasn't finished writing the header yet.
         let version = header[0]
+        guard version != 0 else {
+            release()
+            throw CaptureError.notReady
+        }
         guard version == Layout.layoutVersion else {
-            munmap(mapped, Layout.totalSizeBytes)
-            mappedPointer = nil
-            close(fd)
-            fileDescriptor = -1
+            release()
             throw CaptureError.outdatedLayout(version)
+        }
+        guard segmentSize >= Layout.totalSizeBytes else {
+            release()
+            throw CaptureError.headerValidationFailed("segment is \(segmentSize) bytes, expected \(Layout.totalSizeBytes)")
         }
         let actualCapacity = header[2]
         let actualChannels = header[3]
@@ -186,14 +213,14 @@ public final class VirtualDeviceCapture {
         guard actualCapacity == Layout.capacityFrames,
               actualChannels == Layout.channelCount,
               actualSampleRate == Layout.sampleRateHz else {
-            munmap(mapped, Layout.totalSizeBytes)
-            mappedPointer = nil
-            close(fd)
-            fileDescriptor = -1
+            release()
             throw CaptureError.headerValidationFailed(
                 "expected capacity=\(Layout.capacityFrames) channels=\(Layout.channelCount) sampleRate=\(Layout.sampleRateHz), " +
                 "got capacity=\(actualCapacity) channels=\(actualChannels) sampleRate=\(actualSampleRate)")
         }
+        fileDescriptor = fd
+        mappedPointer = mapped
+        headerIsWritable = writable
 
         let ringFloatsBase = mapped.advanced(by: Layout.headerSizeBytes).assumingMemoryBound(to: Float.self)
         // Start from "now" — don't replay whatever was already sitting
@@ -246,7 +273,10 @@ public final class VirtualDeviceCapture {
             // iteration before unmapping — see stoppedSignal's comment.
             // Timeout is defensive only; the loop's own sleep is 5ms,
             // so this should return almost immediately in practice.
-            _ = state.stoppedSignal.wait(timeout: .now() + 1.0)
+            if state.stoppedSignal.wait(timeout: .now() + 1.0) == .timedOut {
+                // The poll thread may still be reading it: leak the mapping rather than unmap it underneath.
+                mappedPointer = nil
+            }
         }
         pollState = nil
         pollThread = nil

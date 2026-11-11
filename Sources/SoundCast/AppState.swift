@@ -839,6 +839,10 @@ final class AppState: ObservableObject {
                 return .waitingForDriver
             }
             if case .virtualDevice = source,
+               case VirtualDeviceCapture.CaptureError.notReady = error {
+                return .waitingForDriver
+            }
+            if case .virtualDevice = source,
                case VirtualDeviceCapture.CaptureError.outdatedLayout = error {
                 outdatedDriverSources.insert(source)
                 return .waitingForDriver
