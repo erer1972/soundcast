@@ -23,6 +23,8 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
 
     private static let chunkFrames = 960
     private static let reserveSeconds = 0.2
+    // Sent ahead of real time so the speaker can ride out Wi-Fi stalls (~300 ms seen).
+    private static let leadSeconds = 1.0
     private static let waveLength: UInt32 = 2_147_483_644
     private let source: RingBuffer
     private let sampleRate: Double
@@ -276,7 +278,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         var peak: Float = 0
         var chunks = 0
         var remaining = audioBytes
-        var silentFrames = Int(sampleRate * delaySeconds)
+        var silentFrames = Int(sampleRate * (delaySeconds + Self.leadSeconds))
         var shortChunks = 0
         defer { NSLog("[SoundCast][SonosHTTPAudioServer] stream ended: \(chunks) chunks, \(shortChunks) short, peak \(peak)") }
 
@@ -293,6 +295,8 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
         }
         var nextDeadline = ProcessInfo.processInfo.systemUptime
         let streamStart = nextDeadline
+        // The lead silence goes out as fast as the speaker takes it.
+        nextDeadline -= Self.leadSeconds
         var nextReport = streamStart + 30
         var maxSendWait = 0.0
         var maxBehind = 0.0

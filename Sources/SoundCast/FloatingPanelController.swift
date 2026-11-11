@@ -8,10 +8,9 @@ private final class WidgetPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-/// Owns the always-on-top desktop panel: show/hide, size (compact or
+/// Owns the desktop panel: show/hide, size (compact or
 /// expanded), position, and remembering all three between launches.
-/// It is a plain window, so it needs no app extension, App Group or
-/// Apple developer signing (unlike a real WidgetKit widget).
+/// It is a plain window, so it needs no app extension or shared container.
 @MainActor
 final class FloatingPanelController: ObservableObject {
     static let compactSize = NSSize(width: 364, height: 176)
@@ -115,8 +114,8 @@ final class FloatingPanelController: ObservableObject {
             backing: .buffered,
             defer: false
         )
-        panel.level = .floating
-        panel.isFloatingPanel = true
+        panel.level = .normal
+        panel.isFloatingPanel = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.isMovableByWindowBackground = true
