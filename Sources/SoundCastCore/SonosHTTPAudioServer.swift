@@ -292,18 +292,28 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             Thread.sleep(forTimeInterval: 0.005)
         }
         var nextDeadline = ProcessInfo.processInfo.systemUptime
+        let streamStart = nextDeadline
+        var nextReport = streamStart + 30
+        var maxSendWait = 0.0
+        var maxBehind = 0.0
+        var minQueued = Int.max
+        var maxQueued = 0
 
         while isRunning && remaining > 0 {
+            let queued = source.framesAvailable / 2
+            minQueued = min(minQueued, queued)
+            maxQueued = max(maxQueued, queued)
             var samples = [Float](repeating: 0, count: Self.chunkFrames * 2)
             let silent = min(silentFrames, Self.chunkFrames)
             silentFrames -= silent
             // If the reserve ran dry, give the next capture burst a moment
-            // rather than padding this chunk with silence.
+            // rather than padding this chunk with silence — but never past
+            // the chunk's due time, or a capture gap would feed the Sonos
+            // slower than real time until it drops the stream.
             let needed = (Self.chunkFrames - silent) * 2
-            var waited = 0.0
-            while isRunning && source.framesAvailable < needed && waited < 0.04 {
+            while isRunning && source.framesAvailable < needed
+                    && ProcessInfo.processInfo.systemUptime < nextDeadline + 0.04 {
                 Thread.sleep(forTimeInterval: 0.002)
-                waited += 0.002
             }
             if source.framesAvailable < needed { shortChunks += 1 }
             let status = samples.withUnsafeMutableBufferPointer {
@@ -326,6 +336,7 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
             let encoded = Self.pcm16(samples)
             let count = min(remaining, encoded.count)
             let result = NWSendResult()
+            let sendStart = ProcessInfo.processInfo.systemUptime
             connection.send(content: Data(encoded.prefix(count)), completion: .contentProcessed { error in
                 result.finish(error == nil)
             })
@@ -334,10 +345,23 @@ public final class SonosHTTPAudioServer: @unchecked Sendable {
                 connection.cancel()
                 return
             }
+            let now = ProcessInfo.processInfo.systemUptime
+            maxSendWait = max(maxSendWait, now - sendStart)
             remaining -= count
             chunks += 1
             nextDeadline += Double(Self.chunkFrames) / sampleRate
-            let delay = nextDeadline - ProcessInfo.processInfo.systemUptime
+            maxBehind = max(maxBehind, now - nextDeadline)
+            if now >= nextReport {
+                NSLog("[SoundCast][SonosHTTPAudioServer] \(Int(now - streamStart)) s: \(chunks) chunks, \(shortChunks) short, "
+                      + "queued \(minQueued)–\(maxQueued) frames, max send wait \(Int(maxSendWait * 1000)) ms, "
+                      + "max behind \(Int(maxBehind * 1000)) ms")
+                nextReport += 30
+                maxSendWait = 0
+                maxBehind = 0
+                minQueued = Int.max
+                maxQueued = 0
+            }
+            let delay = nextDeadline - now
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         }
         connection.cancel()
