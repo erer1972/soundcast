@@ -85,8 +85,25 @@ public final class AirPlayUDPPort {
         readSource = source
     }
 
+    /// Resolved destinations. `getaddrinfo` costs several `sysctl`
+    /// calls, which at hundreds of packets a second was ~14% of a core;
+    /// a stream only ever talks to one or two destinations. Locked
+    /// because resends arrive on the receive queue.
+    private var resolvedDestinations: [String: sockaddr_in6] = [:]
+    private let resolvedLock = NSLock()
+
+    private func destination(_ address: String, port: UInt16) throws -> sockaddr_in6 {
+        let key = "\(address)|\(port)"
+        resolvedLock.lock()
+        defer { resolvedLock.unlock() }
+        if let cached = resolvedDestinations[key] { return cached }
+        let resolved = try Self.resolve(address, port: port)
+        resolvedDestinations[key] = resolved
+        return resolved
+    }
+
     public func send(_ bytes: [UInt8], to address: String, port destinationPort: UInt16) throws {
-        var destination = try Self.resolve(address, port: destinationPort)
+        var destination = try destination(address, port: destinationPort)
         let sent = bytes.withUnsafeBytes { bytesPointer in
             withUnsafePointer(to: &destination) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {

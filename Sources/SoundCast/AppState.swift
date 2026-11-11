@@ -14,6 +14,12 @@ import SoundCastCore
 /// earlier single-session version, which only let you pick one source
 /// at a time; that was flagged there as an explicit scope gap, not
 /// silently left as the final design.
+/// Audio levels for the meters, observed only by the views that draw them.
+@MainActor
+final class LevelMeter: ObservableObject {
+    @Published var levels: [AppState.CastSource: Float] = [:]
+}
+
 @MainActor
 final class AppState: ObservableObject {
     /// One thing the user can turn on/off independently. `.globalTap` is
@@ -90,7 +96,11 @@ final class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(transparency, forKey: "Transparency") }
     }
     /// Recent audio level (0...1) per running source, for the meters.
-    @Published private(set) var sourceLevels: [CastSource: Float] = [:]
+    /// Lives in its own object: it changes ~12 times a second, and as an
+    /// @Published property here it re-rendered every view observing
+    /// AppState (menu + widget, ~27% of a core while casting).
+    let levelMeter = LevelMeter()
+    var sourceLevels: [CastSource: Float] { levelMeter.levels }
     private var levelTask: Task<Void, Never>?
     /// Extra delay (ms, may be negative) for this Mac's outputs on top of
     /// the AirPlay alignment, to absorb e.g. a TV's own audio delay.
@@ -369,7 +379,7 @@ final class AppState: ObservableObject {
         guard !runningSessions.isEmpty else {
             levelTask?.cancel()
             levelTask = nil
-            if !sourceLevels.isEmpty { sourceLevels = [:] }
+            if !levelMeter.levels.isEmpty { levelMeter.levels = [:] }
             return
         }
         guard levelTask == nil else { return }
@@ -383,7 +393,7 @@ final class AppState: ObservableObject {
                     // Fast attack, slower release, so the bars don't flicker.
                     levels[source] = max(peak, (self.sourceLevels[source] ?? 0) * 0.7)
                 }
-                if levels != self.sourceLevels { self.sourceLevels = levels }
+                if levels != self.levelMeter.levels { self.levelMeter.levels = levels }
             }
         }
     }

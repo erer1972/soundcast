@@ -130,7 +130,7 @@ struct WidgetPanelView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(state.activeDevices.prefix(compactRows)) { device in
-                            DeviceLine(device: device, level: state.isCasting ? state.level(for: device) : 0)
+                            DeviceLine(device: device, state: state, meter: state.levelMeter)
                         }
                         if state.activeDevices.count > compactRows {
                             Text("+\(state.activeDevices.count - compactRows) more")
@@ -187,6 +187,7 @@ struct WidgetPanelView: View {
                                             .background(.white.opacity(0.12), in: Capsule())
                                             .foregroundStyle(.secondary)
                                         Spacer()
+                                        DeviceMeter(device: device, state: state, meter: state.levelMeter)
                                         if let status = state.airplayStatus[device.id] ?? state.sonosStatus[device.id] {
                                             Text(status)
                                                 .font(.system(size: 10.5))
@@ -237,7 +238,8 @@ private struct SectionLabel: View {
 
 private struct DeviceLine: View {
     let device: SoundDevice
-    let level: Float
+    let state: AppState
+    let meter: LevelMeter
 
     var body: some View {
         HStack {
@@ -246,8 +248,21 @@ private struct DeviceLine: View {
                 Text(device.category.rawValue).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 4)
-            EqBars(level: level)
+            DeviceMeter(device: device, state: state, meter: meter)
         }
+    }
+}
+
+/// A device's level bars. The only view that observes the meter, so the
+/// ~12 Hz level updates redraw just the bars, not the whole panel.
+private struct DeviceMeter: View {
+    let device: SoundDevice
+    /// Not observed: the parent re-renders on AppState changes.
+    let state: AppState
+    @ObservedObject var meter: LevelMeter
+
+    var body: some View {
+        EqBars(level: state.isCasting ? state.level(for: device) : 0)
     }
 }
 
